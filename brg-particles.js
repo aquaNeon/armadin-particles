@@ -872,7 +872,7 @@
     fade:     num(d.textFade, 2.2),       // s of crossfade
     tracking: num(d.textTracking, -0.015),// em
     lineH:    num(d.textLine, 1.06),
-    maxW:     num(d.textMaxW, 0.66),      // longest line, as a fraction of the frame
+    maxW:     num(d.textMaxW, 0.86),      // longest line, as a fraction of the viewport
     weight:   d.textWeight || "600",
     family:   d.textFamily || 'Geist, "Helvetica Neue", "Segoe UI", system-ui, sans-serif',
     color:    d.textColor || CFG.ink,
@@ -1015,7 +1015,13 @@
       var wl = (m && isFinite(m.width)) ? m.width : 0;
       if (wl > widest) widest = wl;
     }
-    var limit = FRAME_W * TXT.maxW * TXT.sg;
+    // Against the real viewport width, in the same px the line was measured
+    // in. This used to be FRAME_W * maxW * sg, and sg is the geometric mean of
+    // the two axis scales -- so the cap moved with the window ASPECT rather
+    // than its width. On a 390x844 phone that resolves to 134% of the screen,
+    // i.e. the guard permitted a line half again wider than the device, which
+    // is exactly the overflow it exists to prevent.
+    var limit = cw * TXT.maxW;
     item.fit = (widest > limit && widest > 0) ? limit / widest : 1;
   }
 
@@ -1745,6 +1751,10 @@
   window.BRG = {
     lockP: function (v) { SCR.lock = (v == null ? null : +v); },
     debug: function (on) { DBG.on = on !== false; },
+    // Re-measure and re-bake at the host's current size. Resizing a desktop
+    // browser window cannot reach phone widths, so checking small-screen type
+    // means shrinking the element and relaying out by hand.
+    relayout: function () { textLayout(); },
     tick: function (k) {
       var t = lastNow || 0;
       for (var i = 0; i < (k || 1); i++) { t += 1000 / SCENE.fps; tick(t); }
@@ -1763,8 +1773,12 @@
         p: SCR.p, locked: SCR.lock, tween: TWEEN.dur, red: redNow, dbg: DBG,
         redOn: RED.on, redR: RED.r, redBias: SCENE.redBias,
         items: TXT.items.map(function (it) {
+          var reqPx = it.sizeCm * TXT.sg;
           return { text: it.text, w: it.w, tgt: it.tgt, ph: it.ph, offY: it.offY,
-                   px: it.sizeCm * TXT.sg, live: it.live };
+                   px: reqPx, fit: it.fit,
+                   // What is actually drawn, after the max-width fit.
+                   drawnPx: reqPx * (it.fit || 1),
+                   live: it.live };
         }),
       };
     },
