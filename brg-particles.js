@@ -874,7 +874,7 @@
     lineH:    num(d.textLine, 1.06),
     maxW:     num(d.textMaxW, 0.66),      // longest line, as a fraction of the frame
     weight:   d.textWeight || "600",
-    family:   d.textFamily || '"Helvetica Neue", Inter, "Segoe UI", system-ui, sans-serif',
+    family:   d.textFamily || 'Geist, "Helvetica Neue", "Segoe UI", system-ui, sans-serif',
     color:    d.textColor || CFG.ink,
     raster:   0.5,                        // SDF grid is half the display res
     on:       d.text !== "0",
@@ -896,6 +896,28 @@
     var floor = Math.max(TXT.bloatMin, TXT.pad + SCENE.minR);
     return v > floor ? v : floor;
   }
+
+  // The canvas and the two text layers are created by this script, so no
+  // Designer and no external stylesheet can reach them -- they are the only
+  // rules that genuinely have to exist, and shipping a whole stylesheet just
+  // to carry three of them puts a second hosted file and a second integrity
+  // hash on every page for no reason. Inject them once instead. Everything
+  // else the layout needs (the rail, the sticky, the card) is authored
+  // wherever the markup is authored.
+  (function injectBaseCss() {
+    var ID = "brg-base-css";
+    if (document.getElementById(ID)) return;
+    var mount = document.head || document.documentElement;
+    if (!mount || !mount.appendChild) return;   // headless harness has neither
+    var st = document.createElement("style");
+    st.id = ID;
+    st.textContent =
+      "[data-particles] canvas{display:block;width:100%;height:100%}" +
+      "[data-particles] .brg-textlayer{position:absolute;inset:0;pointer-events:none}" +
+      "[data-particles] .brg-text{position:absolute;inset:0;width:100%;height:100%;" +
+      "opacity:0;will-change:opacity,transform}";
+    mount.appendChild(st);
+  })();
 
   var textLayer = document.createElement("div");
   textLayer.className = "brg-textlayer";
