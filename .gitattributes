@@ -1,0 +1,3 @@
+# Keep LF in the blob. The script tag pins an SRI hash of these exact bytes,
+# and a CRLF round-trip on Windows would change them and blank the hero.
+*.js text eol=lf
