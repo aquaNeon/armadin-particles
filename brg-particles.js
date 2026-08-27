@@ -30,6 +30,7 @@
   SCENE.boundary = num(d.boundary, 3);
   SCENE.coverage = num(d.coverage, 1.15);
   SCENE.innerPull = num(d.innerPull, 0.35);
+  SCENE.innerFrom = Math.min(0.98, Math.max(0, num(d.innerFrom, 0.35)));
   SCENE.featureCm = num(d.featureCm, SCENE.featureCm);
   SCENE.redFrac0 = num(d.redFrac0, 0.008);
   SCENE.redFrac1 = num(d.redFrac1, 0.047);
@@ -43,7 +44,11 @@
   SCENE.stiffness = num(d.stiffness, 0.9);
   SCENE.contactDamp = num(d.contactDamp, 0.35);
   SCENE.growRoom = num(d.growRoom, 0.45);
-  SCENE.growPush = num(d.growPush, 0.05);
+  SCENE.growPush = num(d.growPush, 0.14);
+  SCENE.shrinkMax = num(d.shrinkMax, 0.14);
+  SCENE.vLock = Math.max(0, Math.min(1, num(d.vLock, 1)));
+  SCENE.dens = num(d.density, 90);
+  SCENE.densTol = Math.max(1, num(d.densityTol, 2.2));
   SCENE.relaxMax = num(d.relaxMax, 12);
   SCENE.relaxTol = num(d.relaxTol, 0.02);
   SCENE.relaxDepth = num(d.relaxDepth, 0.02);
@@ -53,6 +58,7 @@
   var PX_PER_CM = SCENE.renderW / SCENE.emitterW;
   var FRAME_W = SCENE.emitterW;
   var FRAME_H = SCENE.renderH / PX_PER_CM;
+  var FRAME_AREA = FRAME_W * FRAME_H;
 
   var CFG = {
     count:     Math.max(100, num(d.count, 5000) | 0),
@@ -127,10 +133,14 @@
   }
 
   var LATTICE_CM = 2;
-  var LAT_W = FRAME_W * 1.45, LAT_H = FRAME_H * 1.6;
-  var LX = Math.ceil(LAT_W / LATTICE_CM) + 1;
-  var LY = Math.ceil(LAT_H / LATTICE_CM) + 1;
-  var lat = new Float32Array(LX * LY);
+  var LAT_W = 0, LAT_H = 0, LX = 0, LY = 0, lat = null;
+  function sizeLattice() {
+    LAT_W = FRAME_W * 1.45; LAT_H = FRAME_H * 1.6;
+    LX = Math.ceil(LAT_W / LATTICE_CM) + 1;
+    LY = Math.ceil(LAT_H / LATTICE_CM) + 1;
+    if (!lat || lat.length !== LX * LY) lat = new Float32Array(LX * LY);
+  }
+  sizeLattice();
 
   var noise3 = makeNoise(mulberry32(CFG.seed));
 
@@ -189,7 +199,8 @@
   var N = 0;
   var px, py, vx, vy, rad, act, pushX, pushY, pushN, order, cellOf, room;
   var corrX, corrY, corrN;
-  var score, fieldV, tjit;
+  var score, fieldV, radV, tjit;
+  var vRef = -1;
   var redOn, lineOn, whiteOn, redTimer, lineTimer;
   var redNow = 0;
 
@@ -210,6 +221,7 @@
     corrN = new Int32Array(N);
     preX = new Float32Array(N); preY = new Float32Array(N);
     score = new Float32Array(N); fieldV = new Float32Array(N);
+    radV = new Float32Array(N);
     tjit = new Float32Array(N);
     redOn = new Uint8Array(N); lineOn = new Uint8Array(N); whiteOn = new Uint8Array(N);
     redTimer = new Float32Array(N); lineTimer = new Float32Array(N);
@@ -219,24 +231,53 @@
     gpuCol = new Float32Array(N * 2);
 
     var rand = mulberry32(CFG.seed);
+    var gap = Math.sqrt(FRAME_W * FRAME_H / N);
+    var rowH = gap * 0.8660254;
+    var cols = Math.max(1, Math.ceil(FRAME_W / gap));
+    var rows = Math.max(1, Math.ceil(FRAME_H / rowH));
+    var r0 = Math.min((SCENE.minR + SCENE.maxR) * 0.5, gap * 0.45);
     for (var i = 0; i < N; i++) {
-      px[i] = (rand() - 0.5) * SCENE.emitterW;
-      py[i] = (rand() - 0.5) * SCENE.emitterH;
+      var lx = i % cols, ly = ((i / cols) | 0) % rows;
+      px[i] = -FRAME_W / 2 + (lx + 0.5) * gap + ((ly & 1) ? gap * 0.5 : 0)
+            + (rand() - 0.5) * gap * 0.45;
+      py[i] = -FRAME_H / 2 + (ly + 0.5) * rowH + (rand() - 0.5) * rowH * 0.45;
       vx[i] = 0; vy[i] = 0;
-      rad[i] = (SCENE.minR + SCENE.maxR) * 0.5;
+      rad[i] = r0;
 
-      tjit[i] = rand() * 2 - 1;
+      tjit[i] = rand();
     }
   }
-  allocate(CFG.count);
 
   var CELL = SCENE.maxR * 2;
-  var GX = Math.ceil((FRAME_W + 4 * CELL) / CELL) | 0;
-  var GY = Math.ceil((FRAME_H + 4 * CELL) / CELL) | 0;
-  var GOX = -FRAME_W / 2 - 2 * CELL;
-  var GOY = -FRAME_H / 2 - 2 * CELL;
-  var cellStart = new Int32Array(GX * GY + 1);
-  var cellCount = new Int32Array(GX * GY);
+  var GX = 0, GY = 0, GOX = 0, GOY = 0;
+  var cellStart = null, cellCount = null, gridCursor = null;
+  function sizeGrid() {
+    GX = Math.ceil((FRAME_W + 4 * CELL) / CELL) | 0;
+    GY = Math.ceil((FRAME_H + 4 * CELL) / CELL) | 0;
+    GOX = -FRAME_W / 2 - 2 * CELL;
+    GOY = -FRAME_H / 2 - 2 * CELL;
+    var nc = GX * GY;
+    if (!cellStart || cellCount.length !== nc) {
+      cellStart = new Int32Array(nc + 1);
+      cellCount = new Int32Array(nc);
+      gridCursor = new Int32Array(nc);
+    }
+  }
+
+  function reframe(cw, ch) {
+    var asp = (cw > 0 && ch > 0) ? cw / ch : FRAME_W / FRAME_H;
+    if (asp < 0.2) asp = 0.2; else if (asp > 6) asp = 6;
+    var w = Math.sqrt(FRAME_AREA * asp), h = FRAME_AREA / w;
+    if (Math.abs(w - FRAME_W) < 1e-3) return false;
+    FRAME_W = w; FRAME_H = h;
+    sizeLattice(); sizeGrid();
+    if (U && U.uHalf) gl.uniform2f(U.uHalf, FRAME_W / 2, FRAME_H / 2);
+    return true;
+  }
+
+  sizeGrid();
+  reframe(host.clientWidth, host.clientHeight);
+  allocate(CFG.count);
 
   function buildGrid() {
     cellCount.fill(0);
@@ -253,7 +294,8 @@
     var acc = 0;
     for (c = 0; c < GX * GY; c++) { cellStart[c] = acc; acc += cellCount[c]; }
     cellStart[GX * GY] = acc;
-    var cursor = new Int32Array(GX * GY);
+    gridCursor.fill(0);
+    var cursor = gridCursor;
     for (i = 0; i < N; i++) {
       c = cellOf[i];
       order[cellStart[c] + cursor[c]++] = i;
@@ -344,10 +386,37 @@
       var gy2 = (n / hy) * Math.pow(ay, n - 1) * Math.sign(y);
       var gl = Math.sqrt(gx2 * gx2 + gy2 * gy2) || 1e-6;
 
-      var mag = SCENE.innerPull * (q < 1 ? q : 1) * strength;
+      var qk = (q - SCENE.innerFrom) / (1 - SCENE.innerFrom);
+      if (qk < 0) qk = 0; else if (qk > 1) qk = 1;
+      var mag = SCENE.innerPull * qk * strength;
       if (q > 1) mag += ((q - 1) * hx / fall) * strength;
       vx[i] -= (gx2 / gl) * mag * dt;
       vy[i] -= (gy2 / gl) * mag * dt;
+    }
+  }
+
+  function densityForce(strength, dt) {
+    if (strength <= 0) return;
+    var c, occ = 0, tot = 0;
+    for (c = 0; c < GX * GY; c++) if (cellCount[c] > 0) { occ++; tot += cellCount[c]; }
+    if (occ === 0) return;
+    var mean = tot / occ, over0 = mean * SCENE.densTol;
+    var i, cx, cy;
+    for (i = 0; i < N; i++) {
+      c = cellOf[i];
+      var over = cellCount[c] - over0;
+      if (over <= 0) continue;
+      cx = c % GX; cy = (c - cx) / GX;
+      var l = cx > 0 ? cellCount[c - 1] : cellCount[c];
+      var r = cx < GX - 1 ? cellCount[c + 1] : cellCount[c];
+      var dn = cy > 0 ? cellCount[c - GX] : cellCount[c];
+      var up = cy < GY - 1 ? cellCount[c + GX] : cellCount[c];
+      var gx2 = r - l, gy2 = up - dn;
+      var m = Math.sqrt(gx2 * gx2 + gy2 * gy2);
+      if (m < 1e-6) continue;
+      var k = (over / mean) * strength * dt;
+      vx[i] -= (gx2 / m) * k;
+      vy[i] -= (gy2 / m) * k;
     }
   }
 
@@ -579,8 +648,19 @@
     var p = SCENE.rSkew;
 
     var slack = SCENE.growRoom, limited = CFG.relax > 0;
+
+    var vsum = 0, q;
+    for (q = 0; q < N; q++) {
+      radV[q] = contrast(sampleField(px[q], py[q]), SCENE.cRadius);
+      vsum += radV[q];
+    }
+    var vm = vsum / N;
+    if (vRef < 0) vRef = vm;
+    var shift = SCENE.vLock * (vRef - vm);
+
     for (var i = 0; i < N; i++) {
-      var v = contrast(sampleField(px[i], py[i]), SCENE.cRadius);
+      var v = radV[i] + shift;
+      if (v < 0) v = 0; else if (v > 1) v = 1;
       var target = SCENE.minR + span * Math.pow(v, p);
       if (limited && target > rad[i]) {
         var free = room[i] - rad[i];
@@ -588,6 +668,9 @@
 
         var cap = rad[i] + free * slack + SCENE.growPush;
         if (target > cap) target = cap;
+      } else if (limited && SCENE.shrinkMax > 0) {
+        var floor = rad[i] - SCENE.shrinkMax;
+        if (target < floor) target = floor;
       }
       rad[i] = target;
     }
@@ -621,11 +704,14 @@
   uniform vec3  uInk;
   uniform vec3  uBg;
   uniform vec3  uAccent;
+  uniform float uZoom;
+  uniform float uHollow;
 
   out vec3  vFill;
   out vec3  vLine;
   out float vRingFrac;
   out float vAlpha;
+  out float vFillA;
 
   vec3 pick(float code) {
     if (code < 0.5) return uInk;
@@ -636,8 +722,9 @@
   void main() {
     vFill = pick(aCol.x);
     vLine = pick(aCol.y);
+    vFillA = (aCol.x > 0.5 && aCol.x < 1.5) ? 1.0 - uHollow : 1.0;
 
-    float sizePx = aR * 2.0 * uPxPerCm * uDpr;
+    float sizePx = aR * 2.0 * uPxPerCm * uDpr * uZoom;
 
     // Sub-pixel guard: a disc smaller than a device pixel is drawn at one
     // pixel and faded, rather than aliasing in and out between frames.
@@ -649,7 +736,7 @@
     // small disc than a large one.
     vRingFrac = clamp(uRingPx * uDpr / sizePx, 0.04, 0.42);
 
-    gl_Position = vec4(aPos / uHalf, 0.0, 1.0);
+    gl_Position = vec4(aPos * uZoom / uHalf, 0.0, 1.0);
   }`;
 
   var FRAG = `#version 300 es
@@ -659,6 +746,7 @@
   in vec3  vLine;
   in float vRingFrac;
   in float vAlpha;
+  in float vFillA;
 
   out vec4 outColor;
 
@@ -675,7 +763,7 @@
     float inner = 1.0 - smoothstep(r - vRingFrac - 0.02, r - vRingFrac + 0.02, dist);
     vec3 col = mix(vLine, vFill, inner);
 
-    outColor = vec4(col, outer * vAlpha);
+    outColor = vec4(col, outer * vAlpha * mix(1.0, vFillA, inner));
   }`;
 
   function compile(type, src) {
@@ -697,7 +785,8 @@
   gl.useProgram(prog);
 
   var U = {};
-  ["uHalf","uPxPerCm","uDpr","uRingPx","uInk","uBg","uAccent"].forEach(function (n) {
+  ["uHalf","uPxPerCm","uDpr","uRingPx","uInk","uBg","uAccent","uZoom","uHollow"]
+  .forEach(function (n) {
     U[n] = gl.getUniformLocation(prog, n);
   });
 
@@ -743,6 +832,8 @@
   gl.uniform2f(U.uHalf, FRAME_W / 2, FRAME_H / 2);
   var ringPx = num(d.ringPx, 1.4);
   gl.uniform1f(U.uRingPx, ringPx);
+  gl.uniform1f(U.uZoom, 1);
+  gl.uniform1f(U.uHollow, d.hollow === "1" ? 1 : 0);
 
   gl.clearColor(0, 0, 0, 0);
 
@@ -753,6 +844,9 @@
     canvas.width = Math.round(w * DPR);
     canvas.height = Math.round(h * DPR);
     gl.viewport(0, 0, canvas.width, canvas.height);
+
+    reframe(w, h);
+    gl.uniform2f(U.uHalf, FRAME_W / 2, FRAME_H / 2);
 
     var sx = canvas.width / FRAME_W;
     var sy = canvas.height / FRAME_H;
@@ -767,13 +861,19 @@
     bloat:    num(d.textBloat, -1),
     pad:      num(d.textPad, 1.1),
     radFloor: num(d.textRadFloor, 0.6),
-    jitter:   num(d.textJitter, 1.8),
+    jitter:   num(d.textJitter, 2.2),
+    seal:     num(d.textSeal, -1),
+    slack:    num(d.textSlack, 0.35),
+    damp:     num(d.textDamp, 0.10),
+    rise:     num(d.textRise, 1.8),
+    rushK:    num(d.textRush, 1.2),
     strength: num(d.textStrength, 520),
     wall:     num(d.textWall, 2.2),
     halo:     num(d.textHalo, 7),
     haloK:    num(d.textHaloPush, 0.15),
-    pull:     num(d.textPull, 0.65),
-    reach:    num(d.textReach, 9),
+    pull:     num(d.textPull, 0.85),
+    reach:    num(d.textReach, 14),
+    tail:     num(d.textRelTail, 1.1),
     proj:     num(d.textProj, 1),
     settle:   Math.max(0, num(d.textSettle, 0) | 0),
     hold:     num(d.textHold, 4.5),
@@ -790,6 +890,11 @@
     ready:    false,
     sx: 1, sy: 1, sg: 1, W: 0, H: 0,
   };
+
+  function sealCmFor(item) {
+    if (TXT.seal >= 0) return TXT.seal;
+    return TXT.pad + SCENE.maxR + TXT.jitter * 0.5;
+  }
 
   function bloatCmFor(item) {
     if (TXT.bloat >= 0) return TXT.bloat;
@@ -808,7 +913,8 @@
     st.id = ID;
     st.textContent =
       "[data-particles] canvas{display:block;width:100%;height:100%}" +
-      "[data-particles] .brg-textlayer{position:absolute;inset:0;pointer-events:none}" +
+      "[data-particles] .brg-textlayer{position:absolute;inset:0;pointer-events:none;" +
+      "transform-origin:50% 50%;will-change:transform}" +
       "[data-particles] .brg-text{position:absolute;inset:0;width:100%;height:100%;" +
       "opacity:0;will-change:opacity,transform}";
     mount.appendChild(st);
@@ -850,7 +956,7 @@
         color:  o.color || TXT.color,
         ph: 0, tgt: 0, _in: 0, _out: 1,
         sizeCm: 0, fam: "", col: "",
-        fit: 1, w: 0, prevW: 0, rel: 0, sdf: null, el: null, live: false,
+        fit: 1, w: 0, prevW: 0, rel: 0, hold: 0, grab: 0, sdf: null, el: null, live: false,
         offY: 0,
         bx0: 0, bx1: 0, by0: 0, by1: 0,
         rx0: 0, rx1: 0, ry0: 0, ry1: 0 });
@@ -984,6 +1090,18 @@
       for (k = 0; k < n; k++) if (!mask[k] && !seen[k]) mask[k] = 1;
     }
 
+    var sealPx = sealCmFor(item) * TXT.sg * TXT.raster;
+    if (sealPx > 0.5) {
+      var q2 = sealPx * sealPx, kq;
+      var fs = new Float32Array(n), m2 = new Uint8Array(n);
+      for (kq = 0; kq < n; kq++) fs[kq] = mask[kq] ? 0 : INF;
+      edt2d(fs, w, h);
+      for (kq = 0; kq < n; kq++) m2[kq] = fs[kq] <= q2 ? 1 : 0;
+      for (kq = 0; kq < n; kq++) fs[kq] = m2[kq] ? INF : 0;
+      edt2d(fs, w, h);
+      for (kq = 0; kq < n; kq++) if (fs[kq] > q2) mask[kq] = 1;
+    }
+
     var fo = new Float32Array(n), fi = new Float32Array(n);
 
     var gx0 = 1e9, gx1 = -1e9, gy0 = 1e9, gy1 = -1e9;
@@ -1064,13 +1182,14 @@
     var items = TXT.items, sg = TXT.sg;
     for (var t = 0; t < items.length; t++) {
       var it = items[t];
-      if (!it.sdf || !it.live || (it.w <= 0.002 && it.rel <= 0.002)) continue;
-      var sdf = it.sdf, wgt = it.w, rel = it.rel;
+      if (!it.sdf || !it.live || (it.w <= 0.002 && it.hold <= 0.002)) continue;
+      var sdf = it.sdf, wgt = it.w, rel = it.hold;
       var releasing = rel > 0.002;
       var bx0 = releasing ? it.rx0 : it.bx0, bx1 = releasing ? it.rx1 : it.bx1;
       var by0 = releasing ? it.ry0 : it.by0, by1 = releasing ? it.ry1 : it.by1;
       var reach = releasing ? TXT.reach * sg : 0;
       var halo = TXT.halo * sg;
+      var boost = 1 + TXT.rise * (it.grab || 0);
 
       var oy = it.offY;
       for (var i = 0; i < N; i++) {
@@ -1086,12 +1205,12 @@
 
           var k = (need - probeD) / need;
           if (k > 1) k = 1;
-          mag += TXT.strength * (k + TXT.wall * k * k * k) * wgt;
+          mag += TXT.strength * (k + TXT.wall * k * k * k) * wgt * boost;
         } else if (halo > 0 && probeD < need + halo) {
 
           var hk = 1 - (probeD - need) / halo;
           hk = hk * hk * (3 - 2 * hk);
-          mag += TXT.strength * TXT.haloK * hk * wgt;
+          mag += TXT.strength * TXT.haloK * hk * wgt * boost;
         }
         if (releasing) {
 
@@ -1120,7 +1239,7 @@
         if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
         var need = clearCm(i) * sg;
         if (!probe(sdf, x, y)) continue;
-        if (probeD >= need) continue;
+        if (probeD >= need - TXT.slack * sg) continue;
 
         var f = (probeD < 0 && wgt > 0.05) ? 1 : TXT.proj * wgt;
         var move = (need - probeD) * invSg * f;
@@ -1129,6 +1248,10 @@
 
         var vn = vx[i] * probeX + vy[i] * probeY;
         if (vn < 0) { vx[i] -= probeX * vn * wgt; vy[i] -= probeY * vn * wgt; }
+        if (TXT.damp > 0) {
+          var dk = 1 - TXT.damp * wgt;
+          vx[i] *= dk; vy[i] *= dk;
+        }
       }
     }
   }
@@ -1182,15 +1305,19 @@
     return v < 0 ? 0 : (v > 1 ? 1 : v);
   }
 
-  var TWEEN = { dur: num(d.textTween, 0.55) };
+  var TWEEN = { dur: num(d.textTween, 0.55), out: num(d.textTweenOut, 0.95) };
+
+  var CAM = { z: 1, max: num(d.zoom, 1.42) };
 
   var HYST = num(d.textHyst, 0.02);
 
   var BEAT = {
-    outA: [num(d.beatOutA0, 0.28), num(d.beatOutA1, 0.40)],
-    red:  [num(d.beatRed0,  0.34), num(d.beatRed1,  0.56)],
-    inB:  [num(d.beatInB0,  0.52), num(d.beatInB1,  0.64)],
-    exit: [num(d.beatExit0, 0.76), num(d.beatExit1, 1.00)],
+    outA: [num(d.beatOutA0, 0.24), num(d.beatOutA1, 0.36)],
+    red:  [num(d.beatRed0,  0.30), num(d.beatRed1,  0.52)],
+    inB:  [num(d.beatInB0,  0.44), num(d.beatInB1,  0.56)],
+    outB: [num(d.beatOutB0, 0.80), num(d.beatOutB1, 0.90)],
+    zoom: [num(d.beatZoom0, 0.72), num(d.beatZoom1, 1.00)],
+    exit: [num(d.beatExit0, 0.86), num(d.beatExit1, 1.00)],
   };
 
   function above(cur, p, mark) {
@@ -1271,20 +1398,19 @@
       a.offY = 0;
     }
     if (b) {
-      var e = ramp(p, BEAT.exit[0], BEAT.exit[1]);
-
-      b.offY = e * FRAME_H * 0.95;
+      b.offY = 0;
       b._in  = above(b._in,  p, BEAT.inB[0]);
-      b._out = below(b._out, p, BEAT.exit[1] - 0.07);
+      b._out = below(b._out, p, BEAT.outB[0]);
       b.tgt = (b._in && b._out) ? 1 : 0;
     }
     for (i = 2; i < n; i++) { items[i].tgt = 0; items[i].offY = 0; }
 
-    var stepPh = TWEEN.dur > 0 ? playDt / TWEEN.dur : 1;
+    var stepUp = TWEEN.dur > 0 ? playDt / TWEEN.dur : 1;
+    var stepDn = TWEEN.out > 0 ? playDt / TWEEN.out : 1;
     for (i = 0; i < n; i++) {
       var itp = items[i];
-      if (itp.ph < itp.tgt) itp.ph = Math.min(itp.tgt, itp.ph + stepPh);
-      else if (itp.ph > itp.tgt) itp.ph = Math.max(itp.tgt, itp.ph - stepPh);
+      if (itp.ph < itp.tgt) itp.ph = Math.min(itp.tgt, itp.ph + stepUp);
+      else if (itp.ph > itp.tgt) itp.ph = Math.max(itp.tgt, itp.ph - stepDn);
       itp.w = itp.ph * itp.ph * (3 - 2 * itp.ph);
     }
 
@@ -1297,9 +1423,12 @@
     SCENE.redBias = (RED.bias0 + (RED.bias1 - RED.bias0) * rp) * ease;
     SCENE.rSkew   = RED.skew0 + (RED.skew1 - RED.skew0) * rp;
 
+    var relDecay = TXT.tail > 0 ? Math.exp(-playDt / TXT.tail) : 0;
     for (i = 0; i < n; i++) {
       var itm = items[i];
       itm.rel = (itm.w < itm.prevW) ? 4 * itm.w * (1 - itm.w) : 0;
+      itm.grab = (itm.w > itm.prevW) ? 4 * itm.w * (1 - itm.w) : 0;
+      itm.hold = itm.grab > 0 ? 0 : Math.max(itm.rel, itm.hold * relDecay);
       itm.prevW = itm.w;
       if (itm.el) {
         itm.el.style.opacity = itm.w;
@@ -1307,6 +1436,8 @@
           ? "translateY(" + (-itm.offY * TXT.sy).toFixed(1) + "px)" : "";
       }
     }
+
+    CAM.z = 1 + (CAM.max - 1) * ramp(p, BEAT.zoom[0], BEAT.zoom[1]);
 
     var pe = ramp(p, BEAT.exit[0], BEAT.exit[1]);
     var py2 = ((1 - pe) * 110).toFixed(2) + "vh";
@@ -1342,9 +1473,12 @@
       }
     }
 
+    var relDecay = TXT.tail > 0 ? Math.exp(-playDt / TXT.tail) : 0;
     for (i = 0; i < n; i++) {
       var itm = items[i];
       itm.rel = (itm.w < itm.prevW) ? 4 * itm.w * (1 - itm.w) : 0;
+      itm.grab = (itm.w > itm.prevW) ? 4 * itm.w * (1 - itm.w) : 0;
+      itm.hold = itm.grab > 0 ? 0 : Math.max(itm.rel, itm.hold * relDecay);
       itm.prevW = itm.w;
       if (itm.el) itm.el.style.opacity = itm.w;
     }
@@ -1353,6 +1487,7 @@
   function textLayout() {
     var cw = host.clientWidth, ch = host.clientHeight;
     if (!cw || !ch) return;
+    reframe(cw, ch);
     TXT.sx = cw / FRAME_W;
     TXT.sy = ch / FRAME_H;
     TXT.sg = Math.sqrt(TXT.sx * TXT.sy);
@@ -1374,6 +1509,7 @@
       bakeSdf(it);
     }
     TXT.ready = TXT.on && TXT.items.length > 0;
+    RED.live = false;
   }
 
   function setCopy(list) {
@@ -1400,6 +1536,11 @@
     var dt = (1 / SCENE.fps) * CFG.timeScale;
     frameDt = dt;
     var sub = dt / CFG.substeps;
+    var rush = 1, itl = TXT.items;
+    for (var g = 0; g < itl.length; g++) {
+      var gk = 1 + (itl[g].grab || 0) * TXT.rushK;
+      if (gk > rush) rush = gk;
+    }
 
     bakeField(simTime);
     shadeRadius();
@@ -1408,9 +1549,10 @@
       buildGrid();
       pushApart(CFG.push, sub);
       fieldForce(CFG.field, CFG.fieldFall, sub);
+      densityForce(SCENE.dens, sub);
       textForce(sub);
       friction(CFG.friction, sub);
-      clampSpeed(CFG.maxSpd);
+      clampSpeed(CFG.maxSpd * rush);
       integrate(sub);
     }
 
@@ -1434,7 +1576,13 @@
     gl.bindBuffer(gl.ARRAY_BUFFER, bufCol); gl.bufferSubData(gl.ARRAY_BUFFER, 0, gpuCol);
   }
 
+  var camZ = 1;
   function draw() {
+    if (CAM.z !== camZ) {
+      camZ = CAM.z;
+      gl.uniform1f(U.uZoom, camZ);
+      textLayer.style.transform = camZ === 1 ? "" : "scale(" + camZ.toFixed(4) + ")";
+    }
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.drawArrays(gl.POINTS, 0, N);
   }
@@ -1472,10 +1620,14 @@
 
   }
 
+  var PREROLL = Math.max(0, Math.min(120, num(d.preroll, 16) | 0));
+  for (var pr = 0; pr < PREROLL; pr++) step();
+
   requestAnimationFrame(frame);
 
   window.BRG = {
     lockP: function (v) { SCR.lock = (v == null ? null : +v); },
+    raw: function () { return { n: N, px: px, py: py, rad: rad, w: FRAME_W, h: FRAME_H }; },
     debug: function (on) { DBG.on = on !== false; },
 
     relayout: function () { textLayout(); },
@@ -1495,6 +1647,7 @@
     state: function () {
       return {
         p: SCR.p, locked: SCR.lock, tween: TWEEN.dur, red: redNow, dbg: DBG,
+        zoom: CAM.z, frame: [FRAME_W, FRAME_H],
         redOn: RED.on, redR: RED.r, redBias: SCENE.redBias,
         items: TXT.items.map(function (it) {
           var reqPx = it.sizeCm * TXT.sg;
