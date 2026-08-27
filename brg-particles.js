@@ -847,6 +847,7 @@
 
     reframe(w, h);
     gl.uniform2f(U.uHalf, FRAME_W / 2, FRAME_H / 2);
+    rescaleCopy(w);
 
     var sx = canvas.width / FRAME_W;
     var sy = canvas.height / FRAME_H;
@@ -912,10 +913,11 @@
     var st = document.createElement("style");
     st.id = ID;
     st.textContent =
-      "[data-particles] canvas{display:block;width:100%;height:100%}" +
+      "[data-particles] > canvas{display:block;width:100%;height:100%}" +
       "[data-particles] .brg-textlayer{position:absolute;inset:0;pointer-events:none;" +
+      "display:grid;place-items:center;overflow:hidden;" +
       "transform-origin:50% 50%;will-change:transform}" +
-      "[data-particles] .brg-text{position:absolute;inset:0;width:100%;height:100%;" +
+      "[data-particles] .brg-text{grid-area:1/1;width:100%;height:auto;max-width:none;" +
       "opacity:0;will-change:opacity,transform}";
     mount.appendChild(st);
   })();
@@ -956,7 +958,8 @@
         color:  o.color || TXT.color,
         ph: 0, tgt: 0, _in: 0, _out: 1,
         sizeCm: 0, fam: "", col: "",
-        fit: 1, w: 0, prevW: 0, rel: 0, hold: 0, grab: 0, sdf: null, el: null, live: false,
+        fit: 1, drawPx: 0, drawCw: 0,
+        w: 0, prevW: 0, rel: 0, hold: 0, grab: 0, sdf: null, el: null, live: false,
         offY: 0,
         bx0: 0, bx1: 0, by0: 0, by1: 0,
         rx0: 0, rx1: 0, ry0: 0, ry1: 0 });
@@ -972,34 +975,55 @@
   }
 
   var fitCanvas = null;
-  function fitPhrase(item, cw) {
+  function specPx(item, cw) {
+    var px = item.sizePx * (cw / item.refPx);
+    if (px < item.minPx) px = item.minPx;
+    if (px > item.maxPx) px = item.maxPx;
+    return px;
+  }
+
+  function measureFit(item, px, cw) {
     if (!fitCanvas) {
       fitCanvas = document.createElement("canvas");
       fitCanvas.width = 1; fitCanvas.height = 1;
     }
-
-    var px = item.sizePx * (cw / item.refPx);
-    if (px < item.minPx) px = item.minPx;
-    if (px > item.maxPx) px = item.maxPx;
-
-    item.sizeCm = TXT.sg > 0 ? px / TXT.sg : 0;
-    item.fam = cssVal(item.family, TXT.family);
-    item.col = cssVal(item.color, TXT.color);
-
+    if (!(px > 0)) return 1;
     var ctx = fitCanvas.getContext("2d");
-    var fontPx = px;
-    if (fontPx <= 0) { item.fit = 1; return; }
-    ctx.font = item.weight + " " + fontPx.toFixed(2) + "px " + item.fam;
-    if ("letterSpacing" in ctx) ctx.letterSpacing = (item.tracking * fontPx).toFixed(2) + "px";
+    ctx.font = item.weight + " " + px.toFixed(2) + "px " + (item.fam || TXT.family);
+    if ("letterSpacing" in ctx) ctx.letterSpacing = (item.tracking * px).toFixed(2) + "px";
     var lines = item.text.split("\n"), widest = 0;
     for (var i = 0; i < lines.length; i++) {
       var m = ctx.measureText(lines[i]);
       var wl = (m && isFinite(m.width)) ? m.width : 0;
       if (wl > widest) widest = wl;
     }
-
     var limit = cw * TXT.maxW;
-    item.fit = (widest > limit && widest > 0) ? limit / widest : 1;
+    return (widest > limit && widest > 0) ? limit / widest : 1;
+  }
+
+  function drawnPxFor(item, cw) {
+    var px = specPx(item, cw);
+    return px * measureFit(item, px, cw);
+  }
+
+  function fitPhrase(item, cw) {
+    var px = specPx(item, cw);
+    item.sizeCm = TXT.sg > 0 ? px / TXT.sg : 0;
+    item.fam = cssVal(item.family, TXT.family);
+    item.col = cssVal(item.color, TXT.color);
+    item.fit = measureFit(item, px, cw);
+    item.drawPx = px * item.fit;
+    item.drawCw = cw;
+  }
+
+  function rescaleCopy(cw) {
+    if (!TXT || !TXT.items || !(cw > 0)) return;
+    for (var i = 0; i < TXT.items.length; i++) {
+      var it = TXT.items[i];
+      if (!it.el || !(it.drawPx > 0) || !(it.drawCw > 0)) continue;
+      var want = drawnPxFor(it, cw);
+      it.el.style.width = (it.drawCw * want / it.drawPx).toFixed(2) + "px";
+    }
   }
 
   function drawPhrase(ctx, item, w, h, scale, color) {
@@ -1505,6 +1529,7 @@
       fitPhrase(it, cw);
       it.el.width = dw; it.el.height = dh;
       drawPhrase(it.el.getContext("2d"), it, dw, dh, DPR, it.col);
+      it.el.style.width = "";
       it.el.style.opacity = it.w;
       bakeSdf(it);
     }
