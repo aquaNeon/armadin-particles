@@ -1123,12 +1123,35 @@
     return px * measureFit(item, px, cw);
   }
 
+  function adoptRole(item) {
+    var stack = String(item.fam || "");
+    var token = /sans-serif\s*$/i.test(stack) ? (d.fontSans ? "--brg-sans" : "")
+              : /serif\s*$/i.test(stack)      ? (d.fontSerif ? "--brg-serif" : "")
+              : "";
+    if (!token) return;
+    var asked = firstFamily(stack);
+    if (familyAvailable(asked, item.weight)) return;
+    var sub2 = cssVal("var(" + token + ")", "", "font-family");
+    if (!sub2 || sub2 === stack) return;
+    if (!familyAvailable(firstFamily(sub2), item.weight)) return;
+    if (!item.roleWarned) {
+      item.roleWarned = 1;
+      warn('"' + item.text.split("\n")[0] + '" names ' + asked +
+           ', which this page cannot render, so it is being drawn in ' +
+           (token === "--brg-sans" ? "data-font-sans" : "data-font-serif") +
+           ' instead. Add "font": "' + (token === "--brg-sans" ? "sans" : "serif") +
+           '" to that phrase in the copy embed to say so outright.');
+    }
+    item.fam = sub2;
+  }
+
   function fitPhrase(item, cw) {
     var px = specPx(item, cw);
     item.sizeCm = TXT.sg > 0 ? px / TXT.sg : 0;
     item.fam = cssVal(item.family, TXT.family, "font-family");
     item.col = normColor(cssVal(item.color, "", "color")) || TXT.color || CFG.ink;
     item.weight = String(cssVal(item.rawWeight, TXT.weight, "font-weight"));
+    adoptRole(item);
     item.fit = measureFit(item, px, cw);
     item.drawPx = px * item.fit;
     item.drawCw = cw;
@@ -1683,14 +1706,27 @@
   function loadFonts() {
     if (!document.fonts || !document.fonts.load) return;
     var seen = {}, jobs = [], i;
+    var add = function (spec) {
+      if (seen[spec]) return;
+      seen[spec] = 1;
+      try { jobs.push(document.fonts.load(spec)); } catch (e) {}
+    };
     for (i = 0; i < TXT.items.length; i++) {
       var it = TXT.items[i];
       var fam = it.fam || cssVal(it.family, TXT.family, "font-family");
       if (!fam) continue;
-      var spec = it.weight + " 100px " + fam;
-      if (seen[spec]) continue;
-      seen[spec] = 1;
-      try { jobs.push(document.fonts.load(spec)); } catch (e) {}
+      add(it.weight + " 100px " + fam);
+    }
+    // The project's own faces too, whether or not the copy names them: a
+    // phrase can only be moved onto one (see adoptRole) if it has been
+    // downloaded, and nothing else on the page is obliged to use it.
+    var roles = [["fontSans", "--brg-sans"], ["fontSerif", "--brg-serif"]];
+    for (i = 0; i < roles.length; i++) {
+      if (!d[roles[i][0]]) continue;
+      var rf = cssVal("var(" + roles[i][1] + ")", "", "font-family");
+      if (!rf) continue;
+      add("400 100px " + rf);
+      add("700 100px " + rf);
     }
     if (!jobs.length) { checkFonts(); return; }
     var done = function () { textLayout(); checkFonts(); };
@@ -1704,10 +1740,9 @@
       if (!first || familyAvailable(first, it.weight)) continue;
       var hint = "";
       if (d.fontSerif || d.fontSans) {
-        hint = ' The component sets data-font-' + (d.fontSerif ? "serif" : "sans") +
-               ', but this phrase does not follow it -- give the phrase' +
-               ' "font": "serif" (or "sans") in the copy embed instead of a' +
-               ' hard-coded "family".';
+        hint = ' The component sets a project font, but this phrase does not' +
+               ' follow it -- give the phrase "font": "sans" or "font": "serif"' +
+               ' in the copy embed instead of a hard-coded "family".';
       }
       warn('"' + it.text.split("\n")[0] + '" asked for ' + first +
            ', which is not available -- drawing the next family in the stack.' + hint);
