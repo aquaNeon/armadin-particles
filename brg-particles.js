@@ -80,26 +80,47 @@
     maxDpr:    num(d.maxDpr, 2),
   };
 
-  var hex = function (s, fallback) {
-    s = (s == null ? "" : String(s)).trim();
-    var m = /^rgba?\(([^)]+)\)$/i.exec(s);
-    if (m) {
-      var q = m[1].split(/[\s,\/]+/), r = [], k;
-      for (k = 0; k < q.length && r.length < 3; k++) {
-        if (q[k] === "") continue;
-        var v = parseFloat(q[k]);
-        if (!isFinite(v)) return fallback || [0, 0, 0];
-        r.push(v / 255);
+  // Any CSS colour, resolved the only way that covers every syntax the browser
+  // will ever grow: hand it to a 1x1 canvas and read the pixel back. Hex, rgb,
+  // hsl, named, color-mix, oklch, color(display-p3 ...) all land in sRGB bytes.
+  // The two-seed check first, because fillStyle silently keeps its old value
+  // when handed something it cannot parse.
+  var probeCtx = null;
+  function rasterColor(s) {
+    if (!s) return null;
+    try {
+      if (!probeCtx) {
+        var c = document.createElement("canvas");
+        c.width = 1; c.height = 1;
+        probeCtx = c.getContext("2d", { willReadFrequently: true });
       }
-      if (r.length === 3) return r;
-      return fallback || [0, 0, 0];
-    }
-    var h = s.replace("#", "");
-    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
-    if (!/^[0-9a-f]{6}$/i.test(h)) return fallback || [0, 0, 0];
-    var n = parseInt(h, 16);
-    return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+      probeCtx.fillStyle = "#000000";
+      probeCtx.fillStyle = s;
+      if (probeCtx.fillStyle === "#000000") {
+        probeCtx.fillStyle = "#ffffff";
+        probeCtx.fillStyle = s;
+        if (probeCtx.fillStyle !== "#000000") return null;
+      }
+      probeCtx.clearRect(0, 0, 1, 1);
+      probeCtx.fillRect(0, 0, 1, 1);
+      var d = probeCtx.getImageData(0, 0, 1, 1).data;
+      if (d[3] === 0) return null;
+      return [d[0] / 255, d[1] / 255, d[2] / 255];
+    } catch (e) { return null; }
+  }
+
+  var hex = function (s, fallback) {
+    var rgb = rasterColor((s == null ? "" : String(s)).trim());
+    return rgb || fallback || [0, 0, 0];
   };
+
+  function hexStr(rgb) {
+    var f = function (x) {
+      var h = Math.round(x * 255).toString(16);
+      return h.length < 2 ? "0" + h : h;
+    };
+    return "#" + f(rgb[0]) + f(rgb[1]) + f(rgb[2]);
+  }
 
   function pageBg() {
     var n = host;
@@ -112,11 +133,16 @@
     return "";
   }
 
+  function normColor(v) {
+    var rgb = rasterColor(String(v == null ? "" : v).trim());
+    return rgb ? hexStr(rgb) : "";
+  }
+
   function resolveColors() {
-    CFG.ink    = cssVal(d.ink    || "var(--brg-ink)",  "#111111", "color");
-    CFG.accent = cssVal(d.accent || "var(--brg-red)",  "#e6392c", "color");
-    CFG.bg     = cssVal(d.bg     || "var(--brg-paper)", "", "background-color")
-              || pageBg() || "#ffffff";
+    CFG.ink    = normColor(cssVal(d.ink    || "var(--brg-ink)",  "", "color")) || "#111111";
+    CFG.accent = normColor(cssVal(d.accent || "var(--brg-red)",  "", "color")) || "#e6392c";
+    CFG.bg     = normColor(cssVal(d.bg || "var(--brg-paper)", "", "background-color"))
+              || normColor(pageBg()) || "#ffffff";
     try {
       host.style.setProperty("--brg-ink", CFG.ink);
       host.style.setProperty("--brg-red", CFG.accent);
