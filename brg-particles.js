@@ -141,7 +141,6 @@
   function resolveColors() {
     CFG.ink    = normColor(cssVal(d.ink    || "var(--brg-ink)",  "", "color")) || "#111111";
     CFG.accent = normColor(cssVal(d.accent || "var(--brg-red)",  "", "color")) || "#e6392c";
-    CFG.line   = normColor(cssVal(d.line   || "var(--brg-line)", "", "color")) || CFG.ink;
     CFG.bg     = normColor(cssVal(d.bg || "var(--brg-paper)", "", "background-color"))
               || normColor(pageBg()) || "#ffffff";
     try {
@@ -153,7 +152,6 @@
       ink:    hex(CFG.ink,    [0.067, 0.067, 0.067]),
       bg:     hex(CFG.bg,     [1, 1, 1]),
       accent: hex(CFG.accent, [0.902, 0.224, 0.173]),
-      line:   hex(CFG.line,   [0.067, 0.067, 0.067]),
     };
   }
 
@@ -774,7 +772,6 @@
   uniform vec3  uInk;
   uniform vec3  uBg;
   uniform vec3  uAccent;
-  uniform vec3  uLine;
   uniform float uZoom;
   uniform float uHollow;
 
@@ -792,7 +789,7 @@
 
   void main() {
     vFill = pick(aCol.x);
-    vLine = (aCol.y > 1.5) ? uAccent : uLine;
+    vLine = pick(aCol.y);
     vFillA = (aCol.x > 0.5 && aCol.x < 1.5) ? 1.0 - uHollow : 1.0;
 
     float sizePx = aR * 2.0 * uPxPerCm * uDpr * uZoom;
@@ -856,7 +853,7 @@
   gl.useProgram(prog);
 
   var U = {};
-  ["uHalf","uPxPerCm","uDpr","uRingPx","uInk","uBg","uAccent","uLine","uZoom","uHollow"]
+  ["uHalf","uPxPerCm","uDpr","uRingPx","uInk","uBg","uAccent","uZoom","uHollow"]
   .forEach(function (n) {
     U[n] = gl.getUniformLocation(prog, n);
   });
@@ -910,7 +907,6 @@
   gl.uniform3fv(U.uInk, COL.ink);
   gl.uniform3fv(U.uBg, COL.bg);
   gl.uniform3fv(U.uAccent, COL.accent);
-  gl.uniform3fv(U.uLine, COL.line);
   gl.uniform2f(U.uHalf, FRAME_W / 2, FRAME_H / 2);
   var ringPx = num(d.ringPx, 1.4);
   gl.uniform1f(U.uRingPx, ringPx);
@@ -1789,14 +1785,13 @@
       gl.uniform3fv(U.uInk, c.ink);
       gl.uniform3fv(U.uBg, c.bg);
       gl.uniform3fv(U.uAccent, c.accent);
-      gl.uniform3fv(U.uLine, c.line);
       setClear(c.bg);
       TXT.color = normColor(cssVal(d.textColor || "", "", "color")) || CFG.ink;
       for (var i = 0; i < TXT.items.length; i++) {
         if (!TXT.items[i].colorSet) TXT.items[i].color = TXT.color;
       }
       textLayout();
-      return { ink: CFG.ink, bg: CFG.bg, accent: CFG.accent, line: CFG.line };
+      return { ink: CFG.ink, bg: CFG.bg, accent: CFG.accent };
     },
     styleOf: function (sel, prop) {
       var el = null;
@@ -1834,7 +1829,7 @@
       return {
         p: SCR.p, locked: SCR.lock, tween: TWEEN.dur, red: redNow, dbg: DBG,
         zoom: CAM.z, frame: [FRAME_W, FRAME_H],
-        color: { ink: CFG.ink, bg: CFG.bg, accent: CFG.accent, line: CFG.line },
+        color: { ink: CFG.ink, bg: CFG.bg, accent: CFG.accent },
         redOn: RED.on, redR: RED.r, redBias: SCENE.redBias,
         items: TXT.items.map(function (it) {
           var reqPx = it.sizeCm * TXT.sg;
