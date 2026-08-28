@@ -898,8 +898,13 @@
     for (i = 0; i < map.length; i++) {
       var raw = d[map[i][0]];
       if (!raw) continue;
+      var attr = map[i][0] === "fontSans" ? "data-font-sans" : "data-font-serif";
       var got = cssVal(String(raw), "", "font-family");
-      if (got) host.style.setProperty(map[i][1], got);
+      if (!got || /var\(|from\(/i.test(got)) {
+        warn(attr + '="' + raw + '" did not resolve to a font family.');
+        continue;
+      }
+      host.style.setProperty(map[i][1], got);
     }
   })();
 
@@ -1010,6 +1015,10 @@
   textLayer.className = "brg-textlayer";
   host.appendChild(textLayer);
 
+  function warn(msg) {
+    try { if (window.console && console.warn) console.warn("[brg] " + msg); } catch (e) {}
+  }
+
   function cssVal(v, fallback, prop) {
     if (typeof v !== "string") return fallback;
     var t = v.trim();
@@ -1032,6 +1041,10 @@
       return out || fallback;
     }
 
+    if (/^var\(|^from\(/i.test(t)) {
+      warn("could not read " + t + " -- check for a missing )");
+      return fallback;
+    }
     return v;
   }
 
@@ -1640,6 +1653,26 @@
     RED.live = false;
   }
 
+  var PROBE_STR = "mmmmmmmmwwwwwwwwiiiiiiiil0O";
+  function familyAvailable(fam, weight) {
+    if (!fam) return true;
+    try {
+      if (!fitCanvas) {
+        fitCanvas = document.createElement("canvas");
+        fitCanvas.width = 1; fitCanvas.height = 1;
+      }
+      var ctx = fitCanvas.getContext("2d");
+      if ("letterSpacing" in ctx) ctx.letterSpacing = "0px";
+      var wOf = function (stack) {
+        ctx.font = (weight || "400") + " 72px " + stack;
+        return ctx.measureText(PROBE_STR).width;
+      };
+      var q = '"' + String(fam).replace(/"/g, "") + '", ';
+      if (Math.abs(wOf(q + "monospace") - wOf("monospace")) > 0.5) return true;
+      return Math.abs(wOf(q + "serif") - wOf("serif")) > 0.5;
+    } catch (e) { return true; }
+  }
+
   function firstFamily(stack) {
     var f = String(stack || "").split(",")[0].trim();
     return f.replace(/^["']|["']$/g, "");
@@ -1657,9 +1690,21 @@
       seen[spec] = 1;
       try { jobs.push(document.fonts.load(spec)); } catch (e) {}
     }
-    if (!jobs.length) return;
-    var done = function () { textLayout(); };
+    if (!jobs.length) { checkFonts(); return; }
+    var done = function () { textLayout(); checkFonts(); };
     Promise.all(jobs).then(done, done);
+  }
+
+  function checkFonts() {
+    if (!document.fonts || !document.fonts.check) return;
+    for (var i = 0; i < TXT.items.length; i++) {
+      var it = TXT.items[i], first = firstFamily(it.fam);
+      if (!first || familyAvailable(first, it.weight)) continue;
+      warn('"' + it.text.split("\n")[0] + '" asked for ' + first +
+           ', which is not available -- drawing the next family in the stack. ' +
+           'Either the copy names a face the page does not load, or the token ' +
+           'behind it did not resolve.');
+    }
   }
 
   function setCopy(list) {
@@ -1804,9 +1849,9 @@
     },
     fonts: function () {
       return TXT.items.map(function (it) {
-        var first = firstFamily(it.fam), ok = false;
-        try { ok = document.fonts.check(it.weight + ' 100px "' + first + '"'); } catch (e) {}
-        return { text: it.text.split("\n")[0], stack: it.fam, first: first, loaded: ok };
+        var first = firstFamily(it.fam);
+        return { text: it.text.split("\n")[0], stack: it.fam, first: first,
+                 available: familyAvailable(first, it.weight) };
       });
     },
     debug: function (on) { DBG.on = on !== false; },
