@@ -13,6 +13,9 @@
     font: 13px/1.6 ui-monospace, monospace; color: #999; }
 
   [data-particles] { position: absolute; inset: 0; overflow: hidden; }
+  /* The copy block is configuration, not content. Invisible already inside a
+     real HTML embed; pasted into a text element it would render as raw JSON. */
+  [data-brg-copy] { display: none !important; }
   [data-particles] > canvas { display: block; width: 100%; height: 100%; }
     position: absolute; top: 12px; left: 14px; margin: 0;
     font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;

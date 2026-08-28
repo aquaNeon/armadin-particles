@@ -1002,6 +1002,7 @@
     var st = document.createElement("style");
     st.id = ID;
     st.textContent =
+      "[data-brg-copy]{display:none !important}" +
       "[data-particles] > canvas{display:block;width:100%;height:100%}" +
       "[data-particles] .brg-textlayer{position:absolute;inset:0;pointer-events:none;" +
       "display:grid;place-items:center;overflow:hidden;" +
@@ -1009,6 +1010,14 @@
       "[data-particles] .brg-text{grid-area:1/1;width:100%;height:auto;max-width:none;" +
       "opacity:0;will-change:opacity,transform}";
     mount.appendChild(st);
+  })();
+
+  (function hideCopyBlocks() {
+    var all = document.querySelectorAll("[data-brg-copy]"), i;
+    for (i = 0; i < all.length; i++) {
+      if (all[i].tagName === "SCRIPT") continue;
+      try { all[i].style.setProperty("display", "none", "important"); } catch (e) {}
+    }
   })();
 
   var textLayer = document.createElement("div");
@@ -1832,7 +1841,21 @@
     tick(now);
   }
 
+  var wasOff = null;
+  function clipOffscreen() {
+    var r;
+    try { r = host.getBoundingClientRect(); } catch (e) { return; }
+    var vh = window.innerHeight || 0, vw = window.innerWidth || 0;
+    var off = r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw;
+    if (off === wasOff) return;
+    wasOff = off;
+    var v = off ? "hidden" : "";
+    textLayer.style.visibility = v;
+    canvas.style.visibility = v;
+  }
+
   function tick(now) {
+    clipOffscreen();
     if (lastNow) fps = fps * 0.9 + (1000 / Math.max(1, now - lastNow)) * 0.1;
     lastNow = now;
 
