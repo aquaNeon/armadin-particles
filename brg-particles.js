@@ -1477,12 +1477,12 @@
   var HYST = num(d.textHyst, 0.02);
 
   var BEAT = {
-    outA: [num(d.beatOutA0, 0.24), num(d.beatOutA1, 0.36)],
-    red:  [num(d.beatRed0,  0.26), num(d.beatRed1,  0.48)],
-    inB:  [num(d.beatInB0,  0.32), num(d.beatInB1,  0.42)],
-    outB: [num(d.beatOutB0, 0.88), num(d.beatOutB1, 0.94)],
-    zoom: [num(d.beatZoom0, 0.88), num(d.beatZoom1, 1.00)],
-    exit: [num(d.beatExit0, 0.88), num(d.beatExit1, 1.00)],
+    outA: [num(d.beatOutA0, 0.20), num(d.beatOutA1, 0.30)],
+    red:  [num(d.beatRed0,  0.24), num(d.beatRed1,  0.46)],
+    inB:  [num(d.beatInB0,  0.28), num(d.beatInB1,  0.38)],
+    outB: [num(d.beatOutB0, 0.85), num(d.beatOutB1, 0.91)],
+    zoom: [num(d.beatZoom0, 0.85), num(d.beatZoom1, 1.00)],
+    exit: [num(d.beatExit0, 0.85), num(d.beatExit1, 1.00)],
   };
 
   function above(cur, p, mark) {
