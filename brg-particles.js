@@ -1478,11 +1478,11 @@
 
   var BEAT = {
     outA: [num(d.beatOutA0, 0.24), num(d.beatOutA1, 0.36)],
-    red:  [num(d.beatRed0,  0.30), num(d.beatRed1,  0.52)],
-    inB:  [num(d.beatInB0,  0.44), num(d.beatInB1,  0.56)],
-    outB: [num(d.beatOutB0, 0.80), num(d.beatOutB1, 0.90)],
-    zoom: [num(d.beatZoom0, 0.80), num(d.beatZoom1, 1.00)],
-    exit: [num(d.beatExit0, 0.86), num(d.beatExit1, 1.00)],
+    red:  [num(d.beatRed0,  0.26), num(d.beatRed1,  0.48)],
+    inB:  [num(d.beatInB0,  0.32), num(d.beatInB1,  0.42)],
+    outB: [num(d.beatOutB0, 0.88), num(d.beatOutB1, 0.94)],
+    zoom: [num(d.beatZoom0, 0.88), num(d.beatZoom1, 1.00)],
+    exit: [num(d.beatExit0, 0.88), num(d.beatExit1, 1.00)],
   };
 
   function above(cur, p, mark) {
