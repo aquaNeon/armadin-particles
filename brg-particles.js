@@ -80,12 +80,48 @@
     maxDpr:    num(d.maxDpr, 2),
   };
 
-  var hex = function (s) {
-    s = s.replace("#", "");
-    if (s.length === 3) s = s[0]+s[0]+s[1]+s[1]+s[2]+s[2];
-    var n = parseInt(s, 16);
+  var hex = function (s, fallback) {
+    s = (s == null ? "" : String(s)).trim();
+    var m = /^rgba?\(([^)]+)\)$/i.exec(s);
+    if (m) {
+      var q = m[1].split(/[\s,\/]+/), r = [], k;
+      for (k = 0; k < q.length && r.length < 3; k++) {
+        if (q[k] === "") continue;
+        var v = parseFloat(q[k]);
+        if (!isFinite(v)) return fallback || [0, 0, 0];
+        r.push(v / 255);
+      }
+      if (r.length === 3) return r;
+      return fallback || [0, 0, 0];
+    }
+    var h = s.replace("#", "");
+    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+    if (!/^[0-9a-f]{6}$/i.test(h)) return fallback || [0, 0, 0];
+    var n = parseInt(h, 16);
     return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
   };
+
+  function pageBg() {
+    var n = host;
+    for (var g = 0; g < 12 && n; g++) {
+      var c = "";
+      try { c = getComputedStyle(n).backgroundColor; } catch (e) {}
+      if (c && c !== "transparent" && !/^rgba\(0,\s*0,\s*0,\s*0\)$/.test(c)) return c;
+      n = n.parentElement;
+    }
+    return "";
+  }
+
+  function resolveColors() {
+    CFG.ink    = cssVal(d.ink    || "var(--brg-ink)",  "#111111");
+    CFG.accent = cssVal(d.accent || "var(--brg-red)",  "#e6392c");
+    CFG.bg     = cssVal(d.bg     || "var(--brg-paper)", "") || pageBg() || "#ffffff";
+    return {
+      ink:    hex(CFG.ink,    [0.067, 0.067, 0.067]),
+      bg:     hex(CFG.bg,     [1, 1, 1]),
+      accent: hex(CFG.accent, [0.902, 0.224, 0.173]),
+    };
+  }
 
   function mulberry32(seed) {
     return function () {
@@ -825,10 +861,10 @@
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA,
                        gl.ONE,       gl.ONE_MINUS_SRC_ALPHA);
 
-  var ink = hex(CFG.ink), bg = hex(CFG.bg), accent = hex(CFG.accent);
-  gl.uniform3fv(U.uInk, ink);
-  gl.uniform3fv(U.uBg, bg);
-  gl.uniform3fv(U.uAccent, accent);
+  var COL = resolveColors();
+  gl.uniform3fv(U.uInk, COL.ink);
+  gl.uniform3fv(U.uBg, COL.bg);
+  gl.uniform3fv(U.uAccent, COL.accent);
   gl.uniform2f(U.uHalf, FRAME_W / 2, FRAME_H / 2);
   var ringPx = num(d.ringPx, 1.4);
   gl.uniform1f(U.uRingPx, ringPx);
@@ -1340,7 +1376,7 @@
     red:  [num(d.beatRed0,  0.30), num(d.beatRed1,  0.52)],
     inB:  [num(d.beatInB0,  0.44), num(d.beatInB1,  0.56)],
     outB: [num(d.beatOutB0, 0.80), num(d.beatOutB1, 0.90)],
-    zoom: [num(d.beatZoom0, 0.72), num(d.beatZoom1, 1.00)],
+    zoom: [num(d.beatZoom0, 0.80), num(d.beatZoom1, 1.00)],
     exit: [num(d.beatExit0, 0.86), num(d.beatExit1, 1.00)],
   };
 
@@ -1537,12 +1573,35 @@
     RED.live = false;
   }
 
+  function firstFamily(stack) {
+    var f = String(stack || "").split(",")[0].trim();
+    return f.replace(/^["']|["']$/g, "");
+  }
+
+  function loadFonts() {
+    if (!document.fonts || !document.fonts.load) return;
+    var seen = {}, jobs = [], i;
+    for (i = 0; i < TXT.items.length; i++) {
+      var it = TXT.items[i];
+      var fam = it.fam || cssVal(it.family, TXT.family);
+      if (!fam) continue;
+      var spec = it.weight + " 100px " + fam;
+      if (seen[spec]) continue;
+      seen[spec] = 1;
+      try { jobs.push(document.fonts.load(spec)); } catch (e) {}
+    }
+    if (!jobs.length) return;
+    var done = function () { textLayout(); };
+    Promise.all(jobs).then(done, done);
+  }
+
   function setCopy(list) {
     for (var i = 0; i < TXT.items.length; i++) {
       if (TXT.items[i].el) textLayer.removeChild(TXT.items[i].el);
     }
     TXT.items = parseCopy(list);
     textLayout();
+    loadFonts();
   }
 
   TXT.items = parseCopy(readCopy());
@@ -1551,6 +1610,7 @@
   if (document.fonts && document.fonts.ready) {
     document.fonts.ready.then(function () { textLayout(); });
   }
+  loadFonts();
 
   var simTime = 0, elapsed = 0, running = true, rafId = 0;
   frameDt = (1 / SCENE.fps) * CFG.timeScale;
@@ -1653,6 +1713,22 @@
   window.BRG = {
     lockP: function (v) { SCR.lock = (v == null ? null : +v); },
     raw: function () { return { n: N, px: px, py: py, rad: rad, w: FRAME_W, h: FRAME_H }; },
+    recolor: function () {
+      var c = resolveColors();
+      gl.uniform3fv(U.uInk, c.ink);
+      gl.uniform3fv(U.uBg, c.bg);
+      gl.uniform3fv(U.uAccent, c.accent);
+      TXT.color = d.textColor || CFG.ink;
+      textLayout();
+      return { ink: CFG.ink, bg: CFG.bg, accent: CFG.accent };
+    },
+    fonts: function () {
+      return TXT.items.map(function (it) {
+        var first = firstFamily(it.fam), ok = false;
+        try { ok = document.fonts.check(it.weight + ' 100px "' + first + '"'); } catch (e) {}
+        return { text: it.text.split("\n")[0], stack: it.fam, first: first, loaded: ok };
+      });
+    },
     debug: function (on) { DBG.on = on !== false; },
 
     relayout: function () { textLayout(); },
@@ -1673,6 +1749,7 @@
       return {
         p: SCR.p, locked: SCR.lock, tween: TWEEN.dur, red: redNow, dbg: DBG,
         zoom: CAM.z, frame: [FRAME_W, FRAME_H],
+        color: { ink: CFG.ink, bg: CFG.bg, accent: CFG.accent },
         redOn: RED.on, redR: RED.r, redBias: SCENE.redBias,
         items: TXT.items.map(function (it) {
           var reqPx = it.sizeCm * TXT.sg;
