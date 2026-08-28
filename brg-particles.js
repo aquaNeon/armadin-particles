@@ -1064,7 +1064,9 @@
         minPx:  num(o.minPx, 0),
         maxPx:  num(o.maxPx, 1e9),
         refPx:  num(o.refPx, 1600),
-        family: o.family || TXT.family,
+        family: (o.font === "serif" ? "var(--brg-serif)"
+              : o.font === "sans"  ? "var(--brg-sans)"
+              : o.family) || TXT.family,
         rawWeight: String(o.weight == null ? TXT.weight : o.weight),
         weight: String(o.weight == null ? TXT.weight : o.weight),
         lineH:  num(o.line, TXT.lineH),
@@ -1700,10 +1702,15 @@
     for (var i = 0; i < TXT.items.length; i++) {
       var it = TXT.items[i], first = firstFamily(it.fam);
       if (!first || familyAvailable(first, it.weight)) continue;
+      var hint = "";
+      if (d.fontSerif || d.fontSans) {
+        hint = ' The component sets data-font-' + (d.fontSerif ? "serif" : "sans") +
+               ', but this phrase does not follow it -- give the phrase' +
+               ' "font": "serif" (or "sans") in the copy embed instead of a' +
+               ' hard-coded "family".';
+      }
       warn('"' + it.text.split("\n")[0] + '" asked for ' + first +
-           ', which is not available -- drawing the next family in the stack. ' +
-           'Either the copy names a face the page does not load, or the token ' +
-           'behind it did not resolve.');
+           ', which is not available -- drawing the next family in the stack.' + hint);
     }
   }
 
