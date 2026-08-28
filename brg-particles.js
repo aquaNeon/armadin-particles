@@ -113,9 +113,15 @@
   }
 
   function resolveColors() {
-    CFG.ink    = cssVal(d.ink    || "var(--brg-ink)",  "#111111");
-    CFG.accent = cssVal(d.accent || "var(--brg-red)",  "#e6392c");
-    CFG.bg     = cssVal(d.bg     || "var(--brg-paper)", "") || pageBg() || "#ffffff";
+    CFG.ink    = cssVal(d.ink    || "var(--brg-ink)",  "#111111", "color");
+    CFG.accent = cssVal(d.accent || "var(--brg-red)",  "#e6392c", "color");
+    CFG.bg     = cssVal(d.bg     || "var(--brg-paper)", "", "background-color")
+              || pageBg() || "#ffffff";
+    try {
+      host.style.setProperty("--brg-ink", CFG.ink);
+      host.style.setProperty("--brg-red", CFG.accent);
+      host.style.setProperty("--brg-paper", CFG.bg);
+    } catch (e) {}
     return {
       ink:    hex(CFG.ink,    [0.067, 0.067, 0.067]),
       bg:     hex(CFG.bg,     [1, 1, 1]),
@@ -861,6 +867,16 @@
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA,
                        gl.ONE,       gl.ONE_MINUS_SRC_ALPHA);
 
+  (function adoptFonts() {
+    var map = [["fontSans", "--brg-sans"], ["fontSerif", "--brg-serif"]], i;
+    for (i = 0; i < map.length; i++) {
+      var raw = d[map[i][0]];
+      if (!raw) continue;
+      var got = cssVal(String(raw), "", "font-family");
+      if (got) host.style.setProperty(map[i][1], got);
+    }
+  })();
+
   var COL = resolveColors();
   gl.uniform3fv(U.uInk, COL.ink);
   gl.uniform3fv(U.uBg, COL.bg);
@@ -871,7 +887,12 @@
   gl.uniform1f(U.uZoom, 1);
   gl.uniform1f(U.uHollow, d.hollow === "1" ? 1 : 0);
 
-  gl.clearColor(0, 0, 0, 0);
+  var PAINT = d.paint === "1";
+  function setClear(c) {
+    if (PAINT) gl.clearColor(c[0], c[1], c[2], 1);
+    else gl.clearColor(0, 0, 0, 0);
+  }
+  setClear(COL.bg);
 
   var DPR = 1;
   function resize() {
@@ -918,8 +939,9 @@
     tracking: num(d.textTracking, -0.015),
     lineH:    num(d.textLine, 1.06),
     maxW:     num(d.textMaxW, 0.86),
-    weight:   d.textWeight || "600",
-    family:   d.textFamily || 'Geist, "Helvetica Neue", "Segoe UI", system-ui, sans-serif',
+    weight:   cssVal(d.textWeight || "600", "600", "font-weight"),
+    family:   cssVal(d.textFamily || 'Geist, "Helvetica Neue", "Segoe UI", system-ui, sans-serif',
+                     'Geist, "Helvetica Neue", "Segoe UI", system-ui, sans-serif', "font-family"),
     color:    d.textColor || CFG.ink,
     raster:   0.5,
     on:       d.text !== "0",
@@ -962,13 +984,29 @@
   textLayer.className = "brg-textlayer";
   host.appendChild(textLayer);
 
-  function cssVal(v, fallback) {
+  function cssVal(v, fallback, prop) {
     if (typeof v !== "string") return fallback;
-    var m = /^var\(\s*(--[\w-]+)\s*\)$/.exec(v.trim());
-    if (!m) return v;
-    var got = "";
-    try { got = getComputedStyle(host).getPropertyValue(m[1]).trim(); } catch (e) {}
-    return got || fallback;
+    var t = v.trim();
+    if (/^--[\w-]+$/.test(t)) t = "var(" + t + ")";
+
+    var m = /^var\(\s*(--[\w-]+)\s*(?:,([\s\S]*))?\)$/.exec(t);
+    if (m) {
+      var got = "";
+      try { got = getComputedStyle(host).getPropertyValue(m[1]).trim(); } catch (e) {}
+      return got || (m[2] == null ? "" : m[2].trim()) || fallback;
+    }
+
+    var f = /^from\(\s*([\s\S]+?)\s*(?:,\s*([-\w]+)\s*)?\)$/.exec(t);
+    if (f) {
+      var el = null;
+      try { el = document.querySelector(f[1]); } catch (e) {}
+      if (!el) return fallback;
+      var out = "";
+      try { out = getComputedStyle(el).getPropertyValue(f[2] || prop || "color").trim(); } catch (e) {}
+      return out || fallback;
+    }
+
+    return v;
   }
 
   function parseCopy(list) {
@@ -988,6 +1026,7 @@
         maxPx:  num(o.maxPx, 1e9),
         refPx:  num(o.refPx, 1600),
         family: o.family || TXT.family,
+        rawWeight: String(o.weight == null ? TXT.weight : o.weight),
         weight: String(o.weight == null ? TXT.weight : o.weight),
         lineH:  num(o.line, TXT.lineH),
         tracking: num(o.tracking, TXT.tracking),
@@ -1045,8 +1084,9 @@
   function fitPhrase(item, cw) {
     var px = specPx(item, cw);
     item.sizeCm = TXT.sg > 0 ? px / TXT.sg : 0;
-    item.fam = cssVal(item.family, TXT.family);
-    item.col = cssVal(item.color, TXT.color);
+    item.fam = cssVal(item.family, TXT.family, "font-family");
+    item.col = cssVal(item.color, TXT.color, "color");
+    item.weight = String(cssVal(item.rawWeight, TXT.weight, "font-weight"));
     item.fit = measureFit(item, px, cw);
     item.drawPx = px * item.fit;
     item.drawCw = cw;
@@ -1583,7 +1623,7 @@
     var seen = {}, jobs = [], i;
     for (i = 0; i < TXT.items.length; i++) {
       var it = TXT.items[i];
-      var fam = it.fam || cssVal(it.family, TXT.family);
+      var fam = it.fam || cssVal(it.family, TXT.family, "font-family");
       if (!fam) continue;
       var spec = it.weight + " 100px " + fam;
       if (seen[spec]) continue;
@@ -1718,9 +1758,19 @@
       gl.uniform3fv(U.uInk, c.ink);
       gl.uniform3fv(U.uBg, c.bg);
       gl.uniform3fv(U.uAccent, c.accent);
+      setClear(c.bg);
       TXT.color = d.textColor || CFG.ink;
       textLayout();
       return { ink: CFG.ink, bg: CFG.bg, accent: CFG.accent };
+    },
+    styleOf: function (sel, prop) {
+      var el = null;
+      try { el = document.querySelector(sel); } catch (e) {}
+      if (!el) return null;
+      var g = getComputedStyle(el);
+      if (prop) return g.getPropertyValue(prop).trim();
+      return { fontFamily: g.fontFamily, fontWeight: g.fontWeight,
+               color: g.color, backgroundColor: g.backgroundColor };
     },
     fonts: function () {
       return TXT.items.map(function (it) {
