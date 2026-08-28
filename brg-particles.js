@@ -968,7 +968,7 @@
     weight:   cssVal(d.textWeight || "600", "600", "font-weight"),
     family:   cssVal(d.textFamily || 'Geist, "Helvetica Neue", "Segoe UI", system-ui, sans-serif',
                      'Geist, "Helvetica Neue", "Segoe UI", system-ui, sans-serif', "font-family"),
-    color:    d.textColor || CFG.ink,
+    color:    normColor(cssVal(d.textColor || "", "", "color")) || CFG.ink,
     raster:   0.5,
     on:       d.text !== "0",
     items:    [],
@@ -1057,6 +1057,7 @@
         lineH:  num(o.line, TXT.lineH),
         tracking: num(o.tracking, TXT.tracking),
         color:  o.color || TXT.color,
+        colorSet: o.color != null,
         ph: 0, tgt: 0, _in: 0, _out: 1,
         sizeCm: 0, fam: "", col: "",
         fit: 1, drawPx: 0, drawCw: 0,
@@ -1111,7 +1112,7 @@
     var px = specPx(item, cw);
     item.sizeCm = TXT.sg > 0 ? px / TXT.sg : 0;
     item.fam = cssVal(item.family, TXT.family, "font-family");
-    item.col = cssVal(item.color, TXT.color, "color");
+    item.col = normColor(cssVal(item.color, "", "color")) || TXT.color || CFG.ink;
     item.weight = String(cssVal(item.rawWeight, TXT.weight, "font-weight"));
     item.fit = measureFit(item, px, cw);
     item.drawPx = px * item.fit;
@@ -1785,7 +1786,10 @@
       gl.uniform3fv(U.uBg, c.bg);
       gl.uniform3fv(U.uAccent, c.accent);
       setClear(c.bg);
-      TXT.color = d.textColor || CFG.ink;
+      TXT.color = normColor(cssVal(d.textColor || "", "", "color")) || CFG.ink;
+      for (var i = 0; i < TXT.items.length; i++) {
+        if (!TXT.items[i].colorSet) TXT.items[i].color = TXT.color;
+      }
       textLayout();
       return { ink: CFG.ink, bg: CFG.bg, accent: CFG.accent };
     },
