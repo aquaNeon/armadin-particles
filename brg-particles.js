@@ -8,7 +8,35 @@
   var host = document.querySelector("[data-particles]");
   if (!host) return;
 
-  var d = host.dataset;
+  // Every tunable is a data-* attribute, and the query string can override any
+  // of them: ?panel=1&text-recycle=6 is the same thing as editing the markup,
+  // without editing the markup. It exists so two settings can be compared by
+  // swapping a URL rather than by saving a file and remembering what was in it
+  // -- which is how a comparison ends up being made against the wrong build.
+  //
+  // Copied into a plain object rather than written back onto the element, so
+  // the DOM still says what the page author actually wrote.
+  var d = {};
+  (function readConfig() {
+    var src = host.dataset, k;
+    for (k in src) if (Object.prototype.hasOwnProperty.call(src, k)) d[k] = src[k];
+    var q = "";
+    try { q = window.location.search || ""; } catch (e) { return; }
+    if (!q) return;
+    var parts = q.replace(/^\?/, "").split("&");
+    for (var i = 0; i < parts.length; i++) {
+      if (!parts[i]) continue;
+      var eq = parts[i].indexOf("=");
+      var name = decodeURIComponent(eq < 0 ? parts[i] : parts[i].slice(0, eq));
+      var val = eq < 0 ? "1" : decodeURIComponent(parts[i].slice(eq + 1));
+      // Accept either spelling, so a value can be lifted straight out of
+      // stage-attributes.txt and pasted into a URL.
+      name = name.replace(/^data-/, "").replace(/-([a-z])/g, function (m, c) {
+        return c.toUpperCase();
+      });
+      if (name) d[name] = val;
+    }
+  })();
   var num = function (v, dflt) { v = parseFloat(v); return isFinite(v) ? v : dflt; };
 
   var SCENE = {
@@ -203,6 +231,7 @@
   // and it exists only to answer a question no shipped frame needs answered.
   var DBG = { on: false, want: 0, near: 0, far: 0 };
   var preX, preY;
+  var birth, rstate;
   var gpuPos, gpuR, gpuCol;
 
   function allocate(n) {
@@ -220,6 +249,8 @@
     score = new Float32Array(N); fieldV = new Float32Array(N);
     tjit = new Float32Array(N);
     redOn = new Uint8Array(N); lineOn = new Uint8Array(N); whiteOn = new Uint8Array(N);
+    birth = new Float32Array(N); birth.fill(1);
+    rstate = new Uint8Array(N);
     redTimer = new Float32Array(N); lineTimer = new Float32Array(N);
 
     gpuPos = new Float32Array(N * 2);
@@ -241,6 +272,7 @@
     }
   }
   allocate(CFG.count);
+  CAP_N = N;
 
   var CELL = SCENE.maxR * 2;
   var GX = Math.ceil((FRAME_W + 4 * CELL) / CELL) | 0;
@@ -249,6 +281,7 @@
   var GOY = -FRAME_H / 2 - 2 * CELL;
   var cellStart = new Int32Array(GX * GY + 1);
   var cellCount = new Int32Array(GX * GY);
+  var cursor = new Int32Array(GX * GY);
 
   function buildGrid() {
     cellCount.fill(0);
@@ -265,7 +298,10 @@
     var acc = 0;
     for (c = 0; c < GX * GY; c++) { cellStart[c] = acc; acc += cellCount[c]; }
     cellStart[GX * GY] = acc;
-    var cursor = new Int32Array(GX * GY);
+    // Hoisted rather than allocated here: buildGrid runs once per substep, so
+    // a fresh Int32Array of GX*GY was four allocations a frame handed straight
+    // to the collector for no reason.
+    cursor.fill(0);
     for (i = 0; i < N; i++) {
       c = cellOf[i];
       order[cellStart[c] + cursor[c]++] = i;
@@ -400,9 +436,21 @@
             for (ai = s0; ai < e0; ai++) {
               i = order[ai];
               var xi = px[i], yi = py[i], ri = rad[i];
+              if (ri < 1e-4) continue;
               var bStart = (k === 0) ? ai + 1 : s2;
               for (bi = bStart; bi < e2; bi++) {
                 j = order[bi];
+                // A disc with no radius has no contact, and it MUST be skipped
+                // rather than merely resolving to a zero-width one: the
+                // correction below is mass-weighted by 1/r^2, so r = 0 makes
+                // the weight infinite, the shared divisor infinite, the
+                // correction 0, and 0 * Infinity NaN -- which then propagates
+                // to every neighbour, every frame, until a couple of thousand
+                // discs are at NaN and land in one clamped grid cell. Nothing
+                // produced a zero radius before recycling existed, so this
+                // could not fire; it is still the wrong arithmetic to leave
+                // sitting there.
+                if (rad[j] < 1e-4) continue;
                 var dx = xi - px[j], dy = yi - py[j];
                 var touch = (ri + rad[j]) * SCENE.gap;
                 var d2 = dx * dx + dy * dy;
@@ -646,7 +694,7 @@
         var cap = rad[i] + free * slack + SCENE.growPush;
         if (target > cap) target = cap;
       }
-      rad[i] = target;
+      rad[i] = birth[i] < 1 ? target * birth[i] : target;
     }
   }
 
@@ -782,9 +830,23 @@
     gl.bufferData(gl.ARRAY_BUFFER, gpuCol, gl.DYNAMIC_DRAW);
   }
 
+  // N is the number of discs SIMULATED. CAP_N is the number ALLOCATED, and
+  // the two are allowed to differ: the frame governor below trims N when the
+  // device cannot keep up, and trimming is just a smaller loop bound -- no
+  // reallocation, no reshuffle, nothing moves. The discs that stop being
+  // drawn are the tail of the array, which is in no particular place on
+  // screen, so it reads as the field thinning rather than as a chunk of it
+  // disappearing.
+  // Declared, not initialised: allocate() runs far above this line and sets it
+  // there, and "var CAP_N = 0" here would execute in source order and wipe it.
+  var CAP_N;
   function setCount(n) {
     allocate(Math.max(100, n | 0));
+    CAP_N = N;
     reallocGpu();
+  }
+  function trimTo(n) {
+    N = Math.max(100, Math.min(CAP_N, n | 0));
   }
 
   gl.enable(gl.BLEND);
@@ -887,6 +949,15 @@
     pad:      num(d.textPad, 1.1),        // cm of packing clearance on top of the bloat
     radFloor: num(d.textRadFloor, 0.6),   // cm; smallest disc keeps at least this gap
     jitter:   num(d.textJitter, 1.8),     // cm; +/- spread of the clearance band
+    // Crease seal. The bloat merges nearby strokes but leaves the concave
+    // notches between them -- the crotch of a V, the join of a stem and a
+    // bowl. A disc in one of those is inside the band of two walls at once,
+    // and a single gradient step cannot clear both: it lands still inside the
+    // other, is corrected back, and sits there bumping frame after frame.
+    // Closing the mask removes the notch instead of fighting over it.
+    // Below 0 the radius is derived: the largest disc plus its clearance, so
+    // exactly those creases too narrow to hold a disc legitimately are sealed.
+    seal:     num(d.textSeal, 6),         // cm; < 0 = auto
     strength: num(d.textStrength, 520),
     wall:     num(d.textWall, 2.2),       // cubic stiffening term at the boundary
     halo:     num(d.textHalo, 7),         // cm of soft thinning outside the band
@@ -897,7 +968,14 @@
     settle:   Math.max(0, num(d.textSettle, 0) | 0),  // extra separate+project trips
     hold:     num(d.textHold, 4.5),       // s a phrase sits still
     fade:     num(d.textFade, 2.2),       // s of crossfade
-    grow:     num(d.textGrow, 0.5),       // scale a phrase enters at, 1 = off
+    grow:     num(d.textGrow, 0.75),      // scale a phrase enters at, 1 = off
+    // How much of the phase the growth takes. Defaults to the opacity delay,
+    // which is the "hole leads the copy" shape -- growth finishes exactly as
+    // the type starts appearing. It has to be settable on its own, though:
+    // with the delay at 0 the two were the same number, so asking for the
+    // copy and its hole to arrive together silently switched the growth off
+    // by dividing by nothing.
+    growSpan: 0,
     tracking: num(d.textTracking, -0.015),// em
     lineH:    num(d.textLine, 1.06),
     maxW:     num(d.textMaxW, 0.86),      // longest line, as a fraction of the viewport
@@ -921,6 +999,11 @@
   // room to spare -- and the same number is the margin the copy ends up
   // sitting in, because dilation grows the outer contour too. The cm floor is
   // there for small type, where 0.30em would be under one disc diameter.
+  function sealCmFor() {
+    if (TXT.seal >= 0) return TXT.seal;
+    return TXT.pad + SCENE.maxR + TXT.jitter * 0.5;
+  }
+
   function bloatCmFor(item) {
     if (TXT.bloat >= 0) return TXT.bloat;
     var em = item.sizeCm * (item.fit || 1);
@@ -995,7 +1078,7 @@
         // grows. Driving it off ph directly would shrink the phrase back down
         // as it fades OUT, which is a different beat than the one being asked
         // for and would drag the whole pack back inward on the way out.
-        gmax: 0, scl: 1, pw: 0,
+        gmax: 0, scl: 1, pw: 0, opening: false,
         sizeCm: 0, fam: "", col: "",        // resolved per layout
         fit: 1, w: 0, prevW: 0, rel: 0, sdf: null, el: null, live: false,
         offY: 0,                            // cm the hole is shifted, for the exit
@@ -1163,6 +1246,21 @@
       for (k = 0; k < n; k++) if (!mask[k] && !seen[k]) mask[k] = 1;
     }
 
+    // Morphological close: dilate by sealPx, then erode by the same. Convex
+    // boundary comes back where it started; anything concave and narrower
+    // than twice the radius is filled and stays filled.
+    var sealPx = sealCmFor() * TXT.sg * TXT.raster;
+    if (sealPx > 0.5) {
+      var q2 = sealPx * sealPx, kq;
+      var fs = new Float32Array(n), m2 = new Uint8Array(n);
+      for (kq = 0; kq < n; kq++) fs[kq] = mask[kq] ? 0 : INF;
+      edt2d(fs, w, h);
+      for (kq = 0; kq < n; kq++) m2[kq] = fs[kq] <= q2 ? 1 : 0;   // dilate
+      for (kq = 0; kq < n; kq++) fs[kq] = m2[kq] ? INF : 0;
+      edt2d(fs, w, h);
+      for (kq = 0; kq < n; kq++) if (fs[kq] > q2) mask[kq] = 1;   // erode back
+    }
+
     var fo = new Float32Array(n), fi = new Float32Array(n);
     // The bounding box comes out of the same pass. It is what lets the force
     // skip the ~90% of the pack that is nowhere near the copy, which is the
@@ -1273,6 +1371,95 @@
     return v > 0 ? v : 0;
   }
 
+  // Recycling — the other way to open a hole.
+  //
+  // Seeding (seedHoles) gets rid of the rim by never making one, at the cost
+  // of the arrival: the pack is already parted before the reader looks, so
+  // there is nothing to watch. If you want the copy to visibly shove the
+  // field apart AND you do not want the pile-up, the only remaining move is
+  // to stop conserving discs locally.
+  //
+  // Slowing the entrance does not work and it is worth saying why. The rim's
+  // height is set by the AREA the hole takes, not by how fast it takes it: at
+  // tween 1s, 2.5s, 4s and 8s the peak band measures 3.58x, 3.45x, 3.43x and
+  // 3.35x. All that changes is when it happens.
+  //
+  // So: discs near the boundary are pushed, and read as pushed. Discs deeper
+  // in than textRecycle are instead faded out where they stand, moved to the
+  // emptiest spot the grid can offer them, and faded back in. Nothing is
+  // deleted -- the frame stays as full as it started -- but the displaced area
+  // is spread across the whole field as a percent or two of density instead of
+  // stacked into a band at the copy's edge.
+  //
+  // Depth is the dial, measured INWARD FROM THE CLEARANCE BAND -- the same
+  // boundary the physics holds, not the glyph outline, because the bloat puts
+  // those about 6cm apart and the annulus between them is most of the
+  // displaced area. At 0 every disc the hole will ever displace is recycled
+  // and the shove is only what the band's own edge does on its way past. Turn
+  // it up and the outer ranks are transported again: more visible push, more
+  // rim. Below 0 the whole thing is off, which is the shipped default --
+  // seeding is on instead.
+  var RCY = {
+    depth: num(d.textRecycle, 6),        // cm past the clearance band; < 0 is off
+    out:   num(d.textRecycleOut, 0.15),  // s to fade out where it stands
+    back:  num(d.textRecycleIn, 0.45),   // s to fade back in where it lands
+    tries: Math.max(1, num(d.textRecycleTries, 12) | 0),
+    live:  0,
+    moved: 0,
+    rand:  null,
+  };
+
+  function cellAt(x, y) {
+    var cx = (x - GOX) / CELL | 0, cy = (y - GOY) / CELL | 0;
+    if (cx < 0) cx = 0; else if (cx >= GX) cx = GX - 1;
+    if (cy < 0) cy = 0; else if (cy >= GY) cy = GY - 1;
+    return cy * GX + cx;
+  }
+
+  // Best of a few random darts, scored on how many discs are already in the
+  // cell they land in. Not the emptiest cell in the frame -- finding that
+  // every time would be a full sweep per recycled disc, and it would also send
+  // every disc to the same place. A handful of darts lands them where there is
+  // room without them all agreeing on where that is.
+  function pickSpot(i) {
+    if (!RCY.rand) RCY.rand = mulberry32((CFG.seed ^ 0x85ebca6b) >>> 0);
+    var bx = 0, by = 0, bestN = 1e9, found = false;
+    for (var k = 0; k < RCY.tries; k++) {
+      var x = (RCY.rand() - 0.5) * SCENE.emitterW;
+      var y = (RCY.rand() - 0.5) * SCENE.emitterH;
+      if (seedBlocked(i, x, y)) continue;
+      var c = cellAt(x, y);
+      var n = cellStart[c + 1] - cellStart[c];
+      if (n < bestN) { bestN = n; bx = x; by = y; found = true; }
+    }
+    if (!found) return false;
+    px[i] = bx; py[i] = by; vx[i] = 0; vy[i] = 0;
+    return true;
+  }
+
+  function recycle(dt) {
+    if (RCY.depth < 0) return;
+    var kOut = 1 / (RCY.out || 1e-6), kIn = 1 / (RCY.back || 1e-6);
+    var live = 0;
+    for (var i = 0; i < N; i++) {
+      var st = rstate[i];
+      if (!st) continue;
+      live++;
+      if (st === 1) {
+        birth[i] -= dt * kOut;
+        if (birth[i] <= 0) {
+          birth[i] = 0;
+          if (pickSpot(i)) RCY.moved++;
+          rstate[i] = 2;
+        }
+      } else {
+        birth[i] += dt * kIn;
+        if (birth[i] >= 1) { birth[i] = 1; rstate[i] = 0; }
+      }
+    }
+    RCY.live = live;
+  }
+
   function textForce(dt) {
     if (!TXT.ready) return;
     var items = TXT.items, sg = TXT.zg;
@@ -1290,6 +1477,7 @@
       // a shape moved up by offY is the same shape sampled at y - offY.
       var oy = it.offY, scl = it.scl;
       for (var i = 0; i < N; i++) {
+        if (rstate[i]) continue;          // mid-recycle: invisible, and not ours to push
         var x = px[i], y = py[i] - oy;
         if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
         var need = clearCm(i) * sg;
@@ -1343,8 +1531,14 @@
       if (!it.sdf || !it.live || it.pw <= 0.002) continue;
       var sdf = it.sdf, wgt = it.pw;
       var bx0 = it.bx0, bx1 = it.bx1, by0 = it.by0, by1 = it.by1;
-      var oy = it.offY, scl = it.scl, grown = it.gmax > 0.9;
+      var oy = it.offY, scl = it.scl, grown = it.gmax > 0.9, opening = !!it.opening;
       for (var i = 0; i < N; i++) {
+        // Fading out or fading back in. Its radius is on its way to zero, so
+        // "eject it from the silhouette" resolves to a correction the size of
+        // the whole hole -- which threw it clear off the frame, into an edge
+        // cell, where a few hundred of them turned the neighbour search
+        // quadratic. Measured 9.6ms of physics a frame becoming 281ms.
+        if (rstate[i]) continue;
         var x = px[i], y = py[i] - oy;
         if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
         var need = clearCm(i) * sg;
@@ -1359,6 +1553,10 @@
         // remove: it would teleport the same discs the same distance, just
         // from a smaller starting shape. While gmax is still climbing they
         // get the ordinary proportional correction and let the sweep do it.
+        // Deep enough in to be recycled rather than shoved. probeD is already
+        // in hand here, so the test is free -- no extra SDF work anywhere.
+        if (RCY.depth >= 0 && opening && !rstate[i] && wgt > 0.15 &&
+            probeD < need - RCY.depth * sg) rstate[i] = 1;
         var f = (probeD < 0 && wgt > 0.05 && grown) ? 1 : TXT.proj * wgt;
         var move = (need - probeD) * invSg * f;
         px[i] += probeX * move;
@@ -1463,9 +1661,11 @@
   // left. The void outlives the copy by half a tween, which is when the pack
   // wants to flow back anyway.
   var TWEEN = {
-    dur:   num(d.textTween, 1.0),
-    delay: Math.min(0.95, Math.max(0, num(d.textDelay, 0.5))),
+    dur:   num(d.textTween, 1.6),
+    delay: Math.min(0.95, Math.max(0, num(d.textDelay, 0.55))),
   };
+  TXT.growSpan = Math.min(1, Math.max(0.05,
+    num(d.textGrowSpan, TWEEN.delay > 0 ? TWEEN.delay : 0.8)));
 
   // Separate on/off marks so a reader parked exactly on a threshold does not
   // chatter the trigger back and forth.
@@ -1659,17 +1859,21 @@
   // actually on screen, not the one that would have been at the top.
   var SEED = { done: false };
 
-  function seedBlocked(i, x, y) {
-    var items = TXT.items;
+  // With no depth: is this disc inside the clearance band of any phrase that
+  // is up? Exactly the band the physics holds, no more -- an extra margin
+  // reads as a vacuum, measured 0.44x density at 8-12cm still sitting there at
+  // eight seconds, because nothing draws the pack back in once it is out.
+  //
+  // With a depth: is it that far INSIDE the silhouette, rather than merely in
+  // the band? That is the recycle test, and it is deliberately the same
+  // function -- "where the copy is" should have one definition.
+  function seedBlocked(i, x, y, depth) {
+    var items = TXT.items, back = (depth > 0 ? depth : 0) * TXT.zg;
     for (var t = 0; t < items.length; t++) {
       var it = items[t];
       if (it.tgt !== 1 || !it.live || !it.sdf) continue;
       probe(it.sdf, x, y - it.offY, 1);
-      // Exactly the clearance band the physics holds, no more. An extra
-      // margin here reads as a vacuum: measured 0.44x density at 8-12cm still
-      // sitting there at eight seconds, because nothing draws the pack back
-      // in once it has been seeded out.
-      if (probeD < clearCm(i) * TXT.zg) return true;
+      if (probeD < clearCm(i) * TXT.zg - back) return true;
     }
     return false;
   }
@@ -1681,6 +1885,37 @@
       if (items[t].tgt === 1 && items[t].live && items[t].sdf) any = true;
     }
     if (!any) return;
+
+    // Two ways to deal with the discs standing where the copy is about to be,
+    // and the first frame is where both of them start.
+    //
+    // With textRecycle off (the default) they are RELOCATED: moved outside
+    // before anything is drawn, so the hole is simply already there and there
+    // was never a shove to make a rim out of.
+    //
+    // With textRecycle on they are MARKED instead. Nothing moves yet; the ones
+    // deeper in than the recycle depth just begin fading, and the hole opens
+    // on screen with the shallow ones being genuinely pushed out of the way.
+    // Same conclusion -- the deep pack never gets transported outward -- but
+    // the reader gets to watch it happen.
+    if (RCY.depth >= 0) {
+      var marked = 0;
+      for (i = 0; i < N; i++) {
+        if (!seedBlocked(i, px[i], py[i], RCY.depth)) continue;
+        rstate[i] = 1;
+        marked++;
+      }
+      SEED.marked = marked;
+      return;
+    }
+
+    // Seeding is OPT IN. It is the strongest tool here -- it is the only thing
+    // that removes the rim outright -- and it removes the arrival with it: the
+    // field is already parted before the reader looks, so the copy does not
+    // appear to do anything. That was the call that got made and unmade twice.
+    // What ships is the arrival, softened; data-seed-holes="1" is one
+    // attribute away if the rim ever matters more than the shove.
+    if (d.seedHoles !== "1") return;
 
     // Its own stream, so the pack's own seed still produces the same pack.
     var rand = mulberry32((CFG.seed ^ 0x9e3779b9) >>> 0);
@@ -1761,6 +1996,13 @@
       // Keyed on the HOLE, not the copy: the release draw exists to invite the
       // pack back into the space the hole is giving up, and after the split
       // those are no longer the same curve.
+      // Opening, as opposed to merely present. Recycling is a thing that
+      // happens to discs the hole is arriving on top of; once it is
+      // established there should be none left inside it, and anything that
+      // wanders in later is the ordinary ejection's job. Without this the two
+      // fight: a disc that cannot find a free spot fades back in where it
+      // stood, is deep inside again, and is marked again, forever.
+      itm.opening = itm.pw > itm.prevW + 1e-6;
       itm.rel = (itm.pw < itm.prevW) ? 4 * itm.pw * (1 - itm.pw) : 0;
       itm.prevW = itm.pw;
       if (itm.el) {
@@ -1872,7 +2114,7 @@
   // Growth is spent inside the invisible half of the phase, so the type is
   // already at full size on the first frame it is visible at all.
   function growOf(it) {
-    var g = it.gmax / (TWEEN.delay || 1e-6);
+    var g = it.gmax / (TXT.growSpan || 1e-6);
     if (g > 1) g = 1;
     g = g * g * (3 - 2 * g);
     return TXT.grow + (1 - TXT.grow) * g;
@@ -1914,15 +2156,6 @@
   }
 
   TXT.items = parseCopy(readCopy());
-  textLayout();
-
-  // Canvas text is rasterised with whatever font is resolved the moment
-  // fillText runs, so a webfont landing after first paint would leave the SDF
-  // hole cut from the fallback metrics while the visible type is the real
-  // face. Rebake once the fonts are actually in.
-  if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(function () { textLayout(); });
-  }
 
   var simTime = 0, elapsed = 0, running = true, rafId = 0;
   frameDt = (1 / SCENE.fps) * CFG.timeScale;
@@ -1935,6 +2168,7 @@
     var sub = dt / CFG.substeps;
 
     bakeField(simTime);
+    recycle(playDt);
     shadeRadius();
 
     for (var s = 0; s < CFG.substeps; s++) {
@@ -1977,10 +2211,87 @@
     gl.drawArrays(gl.POINTS, 0, N);
   }
 
+  // The frame governor.
+  //
+  // Two problems, one mechanism.
+  //
+  // The first is that every rAF ran a full fixed-dt step, so the sequence
+  // played at the refresh rate: correct on the 60Hz screen it was tuned on,
+  // twice as fast on a 120Hz laptop, four times on a 165Hz monitor. Capping
+  // the step rate pins the playback speed to seconds instead of to hardware,
+  // and on a high-refresh display it is also most of the work gone.
+  //
+  // The second is that the cost of a frame is not a property of this code, it
+  // is a property of the machine. At 5000 discs, four substeps and a full
+  // relaxation pass, a frame is comfortable on a laptop and is not on a cheap
+  // phone -- and a phone that cannot make the budget does not degrade
+  // gracefully, it saturates the main thread and every frame becomes a long
+  // task. So measure the frame and spend less when it does not fit: substeps
+  // first, because they are the largest multiplier and the least visible, and
+  // then count, which is visible but is still better than a locked-up page.
+  //
+  // Recovery restores substeps only. Trimming the count is one-way inside a
+  // session: the discs beyond N have stale positions, and re-admitting them
+  // would pop a hundred discs into the frame at once.
+  var PERF = {
+    cap:      Math.max(0, num(d.fpsCap, 60)),
+    cap0:     Math.max(0, num(d.fpsCap, 60)),
+    on:       d.adapt !== "0",
+    minCount: Math.max(0, num(d.countMin, 0) | 0),   // 0 = never trim the count
+    slow:     num(d.frameSlow, 1.6),      // delivered gap / target before giving up
+    fast:     num(d.frameFast, 1.15),     // and before taking it back
+    sub0:     CFG.substeps,
+    iv:       0,
+    seen:     0,
+    next:     0,
+    last:     0,
+    step:     0,
+  };
+  var EVERY = 60;                          // frames between decisions
+
+  function govern() {
+    if (!PERF.on || !PERF.iv) return;
+    if (++PERF.seen < EVERY) return;
+    PERF.seen = 0;
+    var period = 1000 / (PERF.cap > 0 ? PERF.cap : 60);
+    if (PERF.iv > period * PERF.slow) {
+      if (PERF.cap > 31) { PERF.cap = 30; PERF.next = 0; }
+      else if (CFG.substeps > 2) CFG.substeps--;
+      else if (PERF.minCount > 0 && N > PERF.minCount) {
+        trimTo(Math.max(PERF.minCount, (N * 0.8) | 0));
+      } else return;
+      PERF.step++;
+      PERF.iv = 0;
+    } else if (PERF.iv < period * PERF.fast && PERF.step > 0) {
+      if (CFG.substeps < PERF.sub0) CFG.substeps++;
+      else if (PERF.cap < PERF.cap0) { PERF.cap = PERF.cap0; PERF.next = 0; }
+      else return;
+      PERF.step--;
+      PERF.iv = 0;
+    }
+  }
+
   function frame(now) {
     rafId = requestAnimationFrame(frame);
     if (!running) return;
+    if (PERF.cap > 0) {
+      var period = 1000 / PERF.cap;
+      if (now < PERF.next) return;
+      // Far behind -- a backgrounded tab, a long task elsewhere on the page --
+      // resync rather than running a burst of catch-up frames.
+      PERF.next = (now - PERF.next > period * 3) ? now + period : PERF.next + period;
+    }
+    // The gap between frames we actually ran. This is the only quality signal
+    // worth acting on: it is what the reader sees, and unlike a stopwatch
+    // around our own work it accounts for everything else on the page
+    // competing for the same thread.
+    if (PERF.last) {
+      var gap = now - PERF.last;
+      if (gap > 0 && gap < 2000) PERF.iv = PERF.iv ? PERF.iv * 0.85 + gap * 0.15 : gap;
+    }
+    PERF.last = now;
     tick(now);
+    govern();
   }
 
   function tick(now) {
@@ -2013,7 +2324,37 @@
     
   }
 
-  requestAnimationFrame(frame);
+  // Boot off the critical path.
+  //
+  // Baking the copy is the single most expensive thing this file does -- two
+  // exact Euclidean distance transforms over a grid the size of the viewport
+  // -- and it used to run during script evaluation, which on a page with the
+  // script at the end of the body means inside the parser's own task, ahead
+  // of first paint and ahead of anything else the page wanted to do. So does
+  // seeding the pack, and so does every frame after it.
+  //
+  // None of it is needed before the browser has painted. requestIdleCallback
+  // hands it the first gap it gets, and the timeout means a busy page cannot
+  // starve it -- an empty hero is worse than a slow one. Where rIC does not
+  // exist (Safari until recently, and the headless harnesses) it runs
+  // straight away, which is the old behaviour exactly.
+  function boot() {
+    textLayout();
+    // Canvas text is rasterised with whatever font is resolved the moment
+    // fillText runs, so a webfont landing after first paint would leave the
+    // SDF hole cut from the fallback metrics while the visible type is the
+    // real face. Rebake once the fonts are actually in.
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(function () { textLayout(); });
+    }
+    requestAnimationFrame(frame);
+  }
+
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(boot, { timeout: 400 });
+  } else {
+    boot();
+  }
 
   // Small public handle. It exists so the sequence can be driven and inspected
   // from outside -- by a Webflow interaction, by an automated check, or by
@@ -2022,6 +2363,20 @@
   //   BRG.tick(120)   advance frames while rAF is parked
   //   BRG.state()     what the timeline currently thinks
   window.BRG = {
+    // Which build is this, and what is switched on in it? Type BRG.build in
+    // the console. Derived from the live config rather than a version string
+    // somebody has to remember to bump, so it cannot be stale.
+    build: {
+      version: "v5",
+      seed: d.seedHoles !== "0",
+      recycle: RCY.depth >= 0 ? RCY.depth : false,
+      governor: PERF.on,
+      fpsCap: PERF.cap,
+      countFloor: PERF.minCount || "never trims",
+      zoom: { early: ZOOM.early, drift: ZOOM.drift, late: ZOOM.late },
+      grow: TXT.grow,
+      holeLead: TWEEN.delay,
+    },
     lockP: function (v) { SCR.lock = (v == null ? null : +v); },
     debug: function (on) { DBG.on = on !== false; },
     // Re-measure and re-bake at the host's current size. Resizing a desktop
@@ -2048,6 +2403,11 @@
       return {
         p: SCR.p, locked: SCR.lock, tween: TWEEN.dur, red: redNow, dbg: DBG,
         zoom: ZOOM.z,
+        // What the frame governor has settled on.
+        n: N, cap: CAP_N, substeps: CFG.substeps, fpsCap: PERF.cap,
+        frameGap: PERF.iv, degraded: PERF.step,
+        recycling: RCY.live, recycled: RCY.moved,
+        msPhys: msPhys, msShade: msShade,
         redOn: RED.on, redR: RED.r, redBias: SCENE.redBias,
         items: TXT.items.map(function (it) {
           var reqPx = it.sizeCm * TXT.sg;
@@ -2062,10 +2422,41 @@
     },
   };
 
-  document.addEventListener("visibilitychange", function () {
-    running = !document.hidden;
+  // Nothing to draw for someone who has scrolled past it, and a particle sim
+  // quietly burning a core below the fold is the kind of thing that shows up
+  // as somebody else's page being slow. Hidden tab and off-screen are the
+  // same decision, so they share one.
+  var onScreen = true;
+  function setRunning() {
+    running = onScreen && !document.hidden;
     lastNow = 0;
-  });
+    PERF.next = 0;
+    PERF.last = 0;
+    PERF.iv = 0;
+  }
+  document.addEventListener("visibilitychange", setRunning);
+
+  if (typeof IntersectionObserver === "function") {
+    try {
+      new IntersectionObserver(function (es) {
+        onScreen = !!(es[0] && es[0].isIntersecting);
+        setRunning();
+      }, { rootMargin: "150px 0px" }).observe(SCR.sticky || host);
+    } catch (e) {}
+  }
+
+  // Someone who has asked the OS for less motion should not be given a field
+  // that drifts on its own clock. The sequence still answers the scroll --
+  // that is the page working, not decoration -- but the ambient force that
+  // keeps the pack breathing is switched off, and the step rate comes down
+  // with it.
+  try {
+    if (window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      CFG.field = 0;
+      PERF.cap = PERF.cap > 0 ? Math.min(PERF.cap, 20) : 20;
+    }
+  } catch (e) {}
   // Rebaking every phrase costs a few ms, so the SDF trails the canvas by a
   // beat while a window is being dragged. The visible type is CSS-scaled in
   // the meantime, so nothing pops -- the hole just catches up.
